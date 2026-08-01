@@ -7,6 +7,7 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.json.JSONObject
+import java.lang.reflect.Field
 
 class MainHook : IXposedHookLoadPackage {
 
@@ -37,26 +38,124 @@ class MainHook : IXposedHookLoadPackage {
         XposedBridge.log("$TAG: Starting hooks")
         val cl = lpparam.classLoader
 
-        hookProHelper(cl)
-        hookSharedPrefs()
+        // Search for ProHelper by scanning dex entries
+        val proHelper = findProHelper(cl)
+        if (proHelper != null) {
+            hookProHelper(proHelper)
+        } else {
+            XposedBridge.log("$TAG: ProHelper not found, framework hooks only")
+        }
+
+        hookSharedPrefsImpl()
         hookTextView()
-        hookLicenseManager(cl)
     }
 
-    private fun hookProHelper(cl: ClassLoader) {
-        val proHelper = try {
-            cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
+    private fun findProHelper(cl: ClassLoader): Class<*>? {
+        // Try direct name first (works on debug builds)
+        try {
+            return cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
+        } catch (_: Throwable) {}
+
+        // For obfuscated release/beta builds: scan all dex entries
+        XposedBridge.log("$TAG: ProHelper not found by name, scanning dex...")
+        return scanDexForProHelper(cl)
+    }
+
+    private fun scanDexForProHelper(cl: ClassLoader): Class<*>? {
+        try {
+            // Get pathList from BaseDexClassLoader
+            val clClass = cl.javaClass
+            var pathList: Any? = null
+            var cls: Class<*>? = clClass
+            while (cls != null && pathList == null) {
+                try {
+                    val f = cls!!.getDeclaredField("pathList")
+                    f.isAccessible = true
+                    pathList = f.get(cl)
+                } catch (_: Throwable) {
+                    cls = cls!!.superclass
+                }
+            }
+            if (pathList == null) return null
+
+            // Get dexElements array
+            val dexElementsField = pathList!!.javaClass.getDeclaredField("dexElements")
+            dexElementsField.isAccessible = true
+            val dexElements = dexElementsField.get(pathList) as Array<*>
+            if (dexElements.isEmpty()) return null
+
+            // Iterate all dex entries and look for ProHelper
+            for (element in dexElements) {
+                val dexFile = getFieldValue(element!!,javaClass, element, "dexFile") ?: continue
+                val entriesMethod = dexFile.javaClass.getMethod("entries")
+                val entries = entriesMethod.invoke(dexFile) as java.util.Enumeration<String>
+
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    // Skip common framework packages
+                    if (entry.startsWith("android.") || entry.startsWith("java.") ||
+                        entry.startsWith("kotlin.") || entry.startsWith("androidx.") ||
+                        entry.startsWith("com.google.") || entry.startsWith("de.robv.")) continue
+
+                    try {
+                        val candidate = cl.loadClass(entry)
+                        if (isProHelper(candidate)) {
+                            XposedBridge.log("$TAG: Found ProHelper: $entry")
+                            return candidate
+                        }
+                    } catch (_: Throwable) {}
+                }
+            }
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: ProHelper not found by name, searching...")
-            searchProHelper(cl)
+            XposedBridge.log("$TAG: Dex scan failed: $t")
         }
+        return null
+    }
 
-        if (proHelper == null) {
-            XposedBridge.log("$TAG: ProHelper not found, framework hooks only")
-            return
-        }
+    private fun isProHelper(cls: Class<*>): Boolean {
+        // ProHelper uniquely contains a method returning JSONObject with no args
+        // AND methods with String args returning String/boolean
+        // AND references to "is_pro_verified" or "encrypted_config" or "Disabled by Server"
+        try {
+            val methods = cls.declaredMethods
+            var hasJsonReturn = false
+            var hasBoolStringMethod = false
+            var hasStringStringMethod = false
 
-        XposedBridge.log("$TAG: ProHelper: ${proHelper.name}")
+            for (m in methods) {
+                if (m.returnType == JSONObject::class.java && m.parameterTypes.isEmpty()) {
+                    hasJsonReturn = true
+                }
+                if (m.returnType == java.lang.Boolean.TYPE &&
+                    m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
+                    hasBoolStringMethod = true
+                }
+                if (m.returnType == String::class.java &&
+                    m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
+                    hasStringStringMethod = true
+                }
+            }
+
+            // ProHelper has: getDecryptedConfig() -> JSONObject, isProFeature(String) -> boolean,
+            // getHookStringSafely(String) -> String
+            if (hasJsonReturn && hasBoolStringMethod && hasStringStringMethod) {
+                XposedBridge.log("$TAG: Candidate ProHelper: ${cls.name} (json=$hasJsonReturn bool=$hasBoolStringMethod str=$hasStringStringMethod)")
+                return true
+            }
+        } catch (_: Throwable) {}
+        return false
+    }
+
+    private fun getFieldValue(cls: Class<*>, obj: Any, fieldName: String): Any? {
+        return try {
+            val f = cls.getDeclaredField(fieldName)
+            f.isAccessible = true
+            f.get(obj)
+        } catch (_: Throwable) { null }
+    }
+
+    private fun hookProHelper(proHelper: Class<*>) {
+        XposedBridge.log("$TAG: Hooking ProHelper: ${proHelper.name}")
 
         // Hook all no-arg boolean methods -> true
         for (m in proHelper.declaredMethods) {
@@ -72,7 +171,7 @@ class MainHook : IXposedHookLoadPackage {
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java && m.parameterTypes.isEmpty()) {
                 try {
-                    val result = if (m.name.contains("Status") || m.name.contains("status")) "ACTIVE" else "Pro Active"
+                    val result = if (m.name.contains("Status", true) || m.name.contains("status", true)) "ACTIVE" else "Pro Active"
                     XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(result))
                 } catch (_: Throwable) {}
             }
@@ -84,6 +183,7 @@ class MainHook : IXposedHookLoadPackage {
                 m.parameterTypes.contentEquals(arrayOf(java.lang.Boolean.TYPE))) {
                 try {
                     XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: ${m.name}(boolean) -> no-op")
                 } catch (_: Throwable) {}
             }
         }
@@ -129,116 +229,96 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
-    private fun searchProHelper(cl: ClassLoader): Class<*>? {
-        // Try common obfuscated package names
-        val packages = arrayOf("com.waenhancer.xposed.utils", "Z", "z", "a", "b")
-        for (pkg in packages) {
-            try {
-                // Scan dex entries via reflection on DexFile
-                val dexPathList = getFieldObject(cl.javaClass.superclass, cl, "pathList")
-                    ?: getFieldObject(cl.javaClass, cl, "pathList")
-                    ?: continue
-                val dexElements = getFieldObject(dexPathList.javaClass, dexPathList, "dexElements") as? Array<*>
-                    ?: continue
-                for (element in dexElements) {
-                    val dexFile = getFieldObject(element!!.javaClass, element, "dexFile") ?: continue
-                    val entries = dexFile.javaClass.getMethod("entries").invoke(dexFile) as java.util.Enumeration<String>
-                    while (entries.hasMoreElements()) {
-                        val entry = entries.nextElement()
-                        if (!entry.startsWith("$pkg.")) continue
-                        try {
-                            val cls = cl.loadClass(entry)
-                            if (isProHelper(cls)) return cls
-                        } catch (_: Throwable) {}
-                    }
-                }
-            } catch (_: Throwable) {}
+    private fun hookSharedPrefsImpl() {
+        // SharedPreferences is an interface — hook the concrete implementation
+        val spImpl = try {
+            Class.forName("android.app.SharedPreferencesImpl")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: SharedPreferencesImpl not found: $t")
+            return
         }
-        return null
-    }
 
-    private fun isProHelper(cls: Class<*>): Boolean {
+        // Hook getBoolean
         try {
-            for (m in cls.declaredMethods) {
-                val name = m.name
-                if (name == "isProEnabled" || name == "getProStatus" || name == "getProPlanName" ||
-                    name == "isProFeature" || name == "setForceFree" || name == "getDecryptedConfig") {
-                    return true
-                }
-            }
-        } catch (_: Throwable) {}
-        return false
-    }
-
-    private fun getFieldObject(cls: Class<*>, obj: Any, fieldName: String): Any? {
-        return try {
-            val field = cls.getDeclaredField(fieldName)
-            field.isAccessible = true
-            field.get(obj)
-        } catch (_: Throwable) {
-            try {
-                val field = obj.javaClass.getDeclaredField(fieldName)
-                field.isAccessible = true
-                field.get(obj)
-            } catch (_: Throwable) { null }
-        }
-    }
-
-    private fun hookSharedPrefs() {
-        XposedBridge.hookAllMethods(android.content.SharedPreferences::class.java, "getBoolean",
-            object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                    val key = param.args[0] as String
-                    if (key == "is_pro_verified") param.result = true
-                }
-            })
-
-        XposedBridge.hookAllMethods(android.content.SharedPreferences::class.java, "getString",
-            object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                    val key = param.args[0] as String
-                    when (key) {
-                        "license_key" -> param.result = "PATCHER-UNLOCK-0000"
-                        "plan_name" -> param.result = "Pro Active"
-                        "expires_at" -> param.result = (System.currentTimeMillis() + 315360000000L).toString()
+            XposedHelpers.findAndHookMethod(spImpl, "getBoolean",
+                String::class.java, java.lang.Boolean.TYPE,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val key = param.args[0] as String
+                        if (key == "is_pro_verified") {
+                            param.result = true
+                        }
                     }
-                }
-            })
+                })
+            XposedBridge.log("$TAG: SharedPreferencesImpl.getBoolean hooked")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: getBoolean hook failed: $t")
+        }
 
-        XposedBridge.log("$TAG: SharedPreferences hooks installed")
+        // Hook getString
+        try {
+            XposedHelpers.findAndHookMethod(spImpl, "getString",
+                String::class.java, String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val key = param.args[0] as String
+                        when (key) {
+                            "license_key" -> param.result = "PATCHER-UNLOCK-0000"
+                            "plan_name" -> param.result = "Pro Active"
+                            "expires_at" -> param.result = (System.currentTimeMillis() + 315360000000L).toString()
+                        }
+                    }
+                })
+            XposedBridge.log("$TAG: SharedPreferencesImpl.getString hooked")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: getString hook failed: $t")
+        }
+
+        // Hook putBoolean on Editor to prevent is_pro_verified from being set to false
+        val editorImpl = try {
+            Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
+        } catch (_: Throwable) { null }
+
+        if (editorImpl != null) {
+            try {
+                XposedHelpers.findAndHookMethod(editorImpl, "putBoolean",
+                    String::class.java, java.lang.Boolean.TYPE,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            val key = param.args[0] as String
+                            val value = param.args[1] as Boolean
+                            if (key == "is_pro_verified" && !value) {
+                                param.result = param.thisObject
+                            }
+                        }
+                    })
+                XposedBridge.log("$TAG: EditorImpl.putBoolean hooked")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: putBoolean hook failed: $t")
+            }
+        }
     }
 
     private fun hookTextView() {
-        XposedHelpers.findAndHookMethod(android.widget.TextView::class.java, "setText",
-            CharSequence::class.java, android.widget.TextView.BufferType::class.java,
-            object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                    val text = param.args[0] as? CharSequence ?: return
-                    val s = text.toString()
-                    var modified = s
-                    modified = modified.replace("Disabled by Server", "").trim()
-                    modified = modified.replace("Plugin Required", "Pro Active")
-                    modified = modified.replace("[Pro — plugin missing]", "[Pro]")
-                    modified = modified.replace("Activate Pro First", "")
-                    modified = modified.replace("Tap here to verify license key & unlock", "Pro Active")
-                    if (modified != s) param.args[0] = modified
-                }
-            })
-        XposedBridge.log("$TAG: TextView hook installed")
-    }
-
-    private fun hookLicenseManager(cl: ClassLoader) {
         try {
-            val cls = cl.loadClass("com.waenhancer.xposed.utils.LicenseManager")
-            for (m in cls.declaredMethods) {
-                if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                    XposedBridge.log("$TAG: LicenseManager.silentCheck -> no-op")
-                    return
-                }
-            }
-        } catch (_: Throwable) {
-            XposedBridge.log("$TAG: LicenseManager not found by name")
+            XposedHelpers.findAndHookMethod(android.widget.TextView::class.java, "setText",
+                CharSequence::class.java, android.widget.TextView.BufferType::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val text = param.args[0] as? CharSequence ?: return
+                        val s = text.toString()
+                        var modified = s
+                        modified = modified.replace("Disabled by Server", "").trim()
+                        modified = modified.replace("Plugin Required", "Pro Active")
+                        modified = modified.replace("[Pro — plugin missing]", "[Pro]")
+                        modified = modified.replace("Activate Pro First", "")
+                        modified = modified.replace("Tap here to verify license key & unlock", "Pro Active")
+                        if (modified != s) param.args[0] = modified
+                    }
+                })
+            XposedBridge.log("$TAG: TextView hook installed")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: TextView hook failed: $t")
         }
     }
 }
