@@ -86,7 +86,7 @@ class MainHook : IXposedHookLoadPackage {
 
             // Iterate all dex entries and look for ProHelper
             for (element in dexElements) {
-                val dexFile = getFieldValue(element!!,javaClass, element, "dexFile") ?: continue
+                val dexFile = getFieldValue(element.javaClass, element, "dexFile") ?: continue
                 val entriesMethod = dexFile.javaClass.getMethod("entries")
                 val entries = entriesMethod.invoke(dexFile) as java.util.Enumeration<String>
 
