@@ -4,16 +4,16 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 
+import java.lang.reflect.Method;
+import java.security.MessageDigest;
+import java.util.HashSet;
+import java.util.Set;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
-
-import java.lang.reflect.Method;
-import java.security.MessageDigest;
-import java.util.HashSet;
-import java.util.Set;
 
 public class MainHook implements IXposedHookLoadPackage {
 
@@ -55,10 +55,14 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static String getModuleSignature(XC_LoadPackage.LoadPackageParam lpparam) {
         try {
-            PackageInfo pi = android.app.AppGlobals.getInitialPackageInfo(PKG);
+            PackageInfo pi = lpparam.packageInfo;
             if (pi == null) {
-                PackageManager pm = android.app.AppGlobals.getInitialApplication().getPackageManager();
-                pi = pm.getPackageInfo(PKG, PackageManager.GET_SIGNATURES);
+                android.content.Context ctx = (android.content.Context) XposedHelpers.callStaticMethod(
+                        XposedHelpers.findClass("android.app.ActivityThread", lpparam.classLoader),
+                        "currentApplication");
+                if (ctx != null) {
+                    pi = ctx.getPackageManager().getPackageInfo(PKG, PackageManager.GET_SIGNATURES);
+                }
             }
             if (pi != null && pi.signatures != null && pi.signatures.length > 0) {
                 Signature sig = pi.signatures[0];
@@ -96,24 +100,19 @@ public class MainHook implements IXposedHookLoadPackage {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
 
             hookReturnConstant(proHelper, "isProEnabled", true);
-            XposedBridge.log(TAG + ": [" + obfTag + "] isProEnabled → true");
+            XposedBridge.log(TAG + ": [" + obfTag + "] isProEnabled -> true");
 
             hookReturnConstant(proHelper, "getProStatus", "ACTIVE");
-            XposedBridge.log(TAG + ": [" + obfTag + "] getProStatus → ACTIVE");
+            XposedBridge.log(TAG + ": [" + obfTag + "] getProStatus -> ACTIVE");
 
             hookReturnConstant(proHelper, "getProPlanName", "Pro Active");
-
-            hookReturnConstant(proHelper, "isPluginInstalled", android.content.Context.class, true);
-            hookReturnConstant(proHelper, "isPluginPackageInstalled", android.content.Context.class, true);
             hookReturnConstant(proHelper, "isProFeature", String.class, true);
             hookReturnConstant(proHelper, "isPillDesignProEnabled", true);
             hookReturnConstant(proHelper, "isFilterItemsProEnabled", true);
 
-            // Prevent forceFree revocation
             XposedBridge.findAndHookMethod(proHelper, "setForceFree",
                     boolean.class, XC_MethodReplacement.DO_NOTHING);
 
-            // getHookStringSafely → return hookKey (non-null prevents "Disabled by Server")
             XposedBridge.findAndHookMethod(proHelper, "getHookStringSafely",
                     String.class, new XC_MethodReplacement() {
                         @Override
@@ -132,7 +131,6 @@ public class MainHook implements IXposedHookLoadPackage {
     private void hookApp(ClassLoader cl) {
         try {
             Class<?> app = XposedHelpers.findClass("com.waenhancer.App", cl);
-            // Hook onCreate to skip license expiration check
             XposedBridge.findAndHookMethod(app, "onCreate",
                     new XC_MethodReplacement() {
                         @Override
@@ -150,15 +148,13 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> licenseManager = XposedHelpers.findClass(
                     "com.waenhancer.xposed.utils.LicenseManager", cl);
-
-            // silentCheck → no-op
             try {
                 Class<?> listenerClass = Class.forName(
                         "com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl);
                 XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
                         android.content.Context.class, listenerClass,
                         XC_MethodReplacement.DO_NOTHING);
-                XposedBridge.log(TAG + ": LicenseManager.silentCheck → no-op");
+                XposedBridge.log(TAG + ": LicenseManager.silentCheck -> no-op");
             } catch (Throwable ignored) {}
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": LicenseManager hook skipped: " + t.getMessage());
@@ -169,7 +165,6 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> proSwitch = XposedHelpers.findClass(
                     "com.waenhancer.preference.ProSwitchPreference", cl);
-
             XposedBridge.findAndHookMethod(proSwitch, "onClick",
                     new XC_MethodReplacement() {
                         @Override
@@ -179,7 +174,7 @@ public class MainHook implements IXposedHookLoadPackage {
                             return null;
                         }
                     });
-            XposedBridge.log(TAG + ": ProSwitchPreference.onClick → bypassed");
+            XposedBridge.log(TAG + ": ProSwitchPreference.onClick -> bypassed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": ProSwitchPreference hook skipped: " + t.getMessage());
         }
@@ -188,8 +183,6 @@ public class MainHook implements IXposedHookLoadPackage {
     private void injectProConfig(ClassLoader cl, String obfTag) {
         try {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
-
-            // getDecryptedConfig → injected fake config
             XposedBridge.findAndHookMethod(proHelper, "getDecryptedConfig",
                     new XC_MethodReplacement() {
                         @Override
@@ -205,7 +198,6 @@ public class MainHook implements IXposedHookLoadPackage {
                             return config;
                         }
                     });
-
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Config injection error: " + t);
         }
