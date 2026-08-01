@@ -8,6 +8,12 @@ import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.json.JSONObject
 import org.luckypray.dexkit.DexKitBridge
+import org.luckypray.dexkit.query.FindClass
+import org.luckypray.dexkit.query.FindMethod
+import org.luckypray.dexkit.query.matchers.ClassMatcher
+import org.luckypray.dexkit.query.matchers.MethodMatcher
+import org.luckypray.dexkit.query.matchers.StringMatcher
+import org.luckypray.dexkit.query.StringMatchType
 
 class MainHook : IXposedHookLoadPackage {
 
@@ -28,7 +34,9 @@ class MainHook : IXposedHookLoadPackage {
 
         private fun initDexKit(apkPath: String): Boolean {
             return try {
-                dexKit = DexKitBridge.createDexKit(apkPath)
+                synchronized(DexKitBridge::class.java) {
+                    dexKit = DexKitBridge.createDexKit(apkPath)
+                }
                 true
             } catch (t: Throwable) {
                 XposedBridge.log("$TAG: DexKit init failed: $t")
@@ -39,11 +47,16 @@ class MainHook : IXposedHookLoadPackage {
         private fun findClassByStrings(cl: ClassLoader, vararg strings: String): Class<*>? {
             val b = dexKit ?: return null
             return try {
-                val results = b.findClasses {
-                    matcher = matcher {
-                        strings.forEach { usingStrings(it) }
-                    }
+                val query = FindClass()
+                val matcher = ClassMatcher()
+                for (s in strings) {
+                    val sm = StringMatcher()
+                    sm.value = s
+                    sm.matchType = StringMatchType.Contains
+                    matcher.addUsingString(sm)
                 }
+                query.matcher = matcher
+                val results = b.findClasses(query)
                 val name = results.firstOrNull()?.name ?: return null
                 XposedBridge.log("$TAG: Found class via DexKit: $name")
                 cl.loadClass(name)
@@ -56,11 +69,16 @@ class MainHook : IXposedHookLoadPackage {
         private fun findMethodByStrings(cl: ClassLoader, vararg strings: String): java.lang.reflect.Method? {
             val b = dexKit ?: return null
             return try {
-                val results = b.findMethods {
-                    matcher = matcher {
-                        strings.forEach { usingStrings(it) }
-                    }
+                val query = FindMethod()
+                val matcher = MethodMatcher()
+                for (s in strings) {
+                    val sm = StringMatcher()
+                    sm.value = s
+                    sm.matchType = StringMatchType.Contains
+                    matcher.addUsingString(sm)
                 }
+                query.matcher = matcher
+                val results = b.findMethods(query)
                 val data = results.firstOrNull() ?: return null
                 XposedBridge.log("$TAG: Found method via DexKit: ${data.className}.${data.methodName}")
                 val cls = cl.loadClass(data.className)
@@ -169,11 +187,10 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook getHookStringSafely(String) -> passthrough
+        // Hook String(String) methods -> passthrough (getHookStringSafely)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java &&
-                m.parameterTypes.contentEquals(arrayOf(String::class.java)) &&
-                m.returnType != java.lang.Boolean.TYPE) {
+                m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
                 try {
                     XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
                         override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any {
@@ -185,7 +202,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook isProFeature(String) -> true
+        // Hook boolean(String) methods -> true (isProFeature)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
