@@ -11,7 +11,6 @@ yukihookapi-api = { module = "com.highcapable.yukihookapi:api", version.ref = "y
 yukihookapi-ksp = { module = "com.highcapable.yukihookapi:ksp-xposed", version.ref = "yukihookapi" }
 dexkit = { module = "org.luckypray:dexkit", version.ref = "dexkit" }
 kavaref-core = { module = "com.highcapable.kavaref:kavaref-core", version.ref = "kavaref" }
-kavaref-android = { module = "com.highcapable.kavaref:kavaref-android", version.ref = "kavaref" }
 gropify = { module = "com.highcapable.gropify:gropify", version.ref = "gropify" }
 
 [plugins]

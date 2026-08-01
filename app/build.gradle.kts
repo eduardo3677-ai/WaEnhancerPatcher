@@ -54,5 +54,4 @@ dependencies {
     compileOnly(libs.yukihookapi.api)
     implementation(libs.dexkit)
     implementation(libs.kavaref.core)
-    implementation(libs.kavaref.android)
 }
