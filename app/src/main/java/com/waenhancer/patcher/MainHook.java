@@ -121,7 +121,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 Class<?> listenerClass = Class.forName(
                         "com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl);
                 XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
-                        Class.forName("android.content.Context"), listenerClass,
+                        android.content.Context.class, listenerClass,
                         XC_MethodReplacement.DO_NOTHING);
                 XposedBridge.log(TAG + ": LicenseManager.silentCheck -> no-op");
             } catch (Throwable ignored) {}
