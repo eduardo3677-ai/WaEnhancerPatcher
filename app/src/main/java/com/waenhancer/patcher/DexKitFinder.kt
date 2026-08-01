@@ -1,11 +1,8 @@
 package com.waenhancer.patcher
 
-import com.highcapable.kavaref.findField
-import com.highcapable.moshi.companion.CompanionCodec
-import com.highcapable.yukihookapi.hook.core.YukiMember
+import de.robv.android.xposed.XposedBridge
 import org.json.JSONObject
 import org.luckypray.dexkit.DexKitBridge
-import java.lang.reflect.Method
 
 object ProConfig {
     val hookKeys = setOf(
@@ -33,7 +30,7 @@ object DexKitFinder {
             bridge = DexKitBridge.createDexKit(apkPath)
             true
         } catch (t: Throwable) {
-            android.util.Log.e("WAE-Patcher", "DexKit init failed: $t")
+            XposedBridge.log("WAE-Patcher: DexKit init failed: $t")
             false
         }
     }
@@ -48,7 +45,7 @@ object DexKitFinder {
             }
             results.firstOrNull()?.name
         } catch (t: Throwable) {
-            android.util.Log.e("WAE-Patcher", "findClass failed: $t")
+            XposedBridge.log("WAE-Patcher: findClass failed: $t")
             null
         }
     }
@@ -63,7 +60,7 @@ object DexKitFinder {
             }
             results.firstOrNull()?.let { it.className to it.methodName }
         } catch (t: Throwable) {
-            android.util.Log.e("WAE-Patcher", "findMethod failed: $t")
+            XposedBridge.log("WAE-Patcher: findMethod failed: $t")
             null
         }
     }
