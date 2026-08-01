@@ -29,10 +29,11 @@ class MainHook : IXposedHookLoadPackage {
                 HOOK_KEYS.forEach { put(it, it) }
             })
             put("pill_design_pro_enabled", true)
+            put("whitelist_channels", "beta")
         }
-    }
 
-    private var proHelperHooked = false
+        private var spImplHooked = false
+    }
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != PKG) return
@@ -40,8 +41,124 @@ class MainHook : IXposedHookLoadPackage {
         XposedBridge.log("$TAG: Starting hooks")
         val cl = lpparam.classLoader
 
+        // Hook SharedPreferencesImpl IMMEDIATELY - before App.onCreate
+        // This ensures is_pro_verified=true is seen during expiration check
         hookSharedPrefsImpl()
+
+        // Hook App.onCreate to install ProHelper hooks after classes are loaded
         hookAppOnCreate(cl)
+    }
+
+    private fun hookSharedPrefsImpl() {
+        if (spImplHooked) return
+        spImplHooked = true
+
+        val spImpl = try {
+            Class.forName("android.app.SharedPreferencesImpl")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: SharedPreferencesImpl not found: $t")
+            return
+        }
+
+        // getBoolean: force is_pro_verified=true
+        try {
+            XposedHelpers.findAndHookMethod(spImpl, "getBoolean",
+                String::class.java, java.lang.Boolean.TYPE,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val key = param.args[0] as String
+                        if (key == "is_pro_verified") {
+                            param.result = true
+                        }
+                    }
+                })
+            XposedBridge.log("$TAG: SharedPreferencesImpl.getBoolean hooked")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: getBoolean hook failed: $t")
+        }
+
+        // getString: inject valid license data
+        try {
+            XposedHelpers.findAndHookMethod(spImpl, "getString",
+                String::class.java, String::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val key = param.args[0] as String
+                        when (key) {
+                            "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
+                            "plan_name" -> param.result = "Pro Yearly"
+                            "expires_at" -> param.result = "1893456000000"
+                            "tg_username" -> param.result = "patcher"
+                            "whitelist_channels" -> param.result = "beta,stable"
+                            "encrypted_config" -> param.result = null
+                        }
+                    }
+                })
+            XposedBridge.log("$TAG: SharedPreferencesImpl.getString hooked")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: getString hook failed: $t")
+        }
+
+        // getLong: force expires_at far future
+        try {
+            XposedHelpers.findAndHookMethod(spImpl, "getLong",
+                String::class.java, java.lang.Long.TYPE,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        val key = param.args[0] as String
+                        if (key == "expires_at") {
+                            param.result = 1893456000000L
+                        }
+                    }
+                })
+            XposedBridge.log("$TAG: SharedPreferencesImpl.getLong hooked (expires_at)")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: getLong hook failed: $t")
+        }
+
+        // EditorImpl.putBoolean: prevent is_pro_verified from being set to false
+        val editorImpl = try {
+            Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
+        } catch (_: Throwable) { null }
+
+        if (editorImpl != null) {
+            try {
+                XposedHelpers.findAndHookMethod(editorImpl, "putBoolean",
+                    String::class.java, java.lang.Boolean.TYPE,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            val key = param.args[0] as String
+                            val value = param.args[1] as Boolean
+                            if (key == "is_pro_verified" && !value) {
+                                // Block revocation
+                                param.result = param.thisObject
+                            }
+                        }
+                    })
+                XposedBridge.log("$TAG: EditorImpl.putBoolean hooked")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: putBoolean hook failed: $t")
+            }
+
+            // Also block removal of encrypted_config
+            try {
+                XposedHelpers.findAndHookMethod(editorImpl, "remove",
+                    String::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            val key = param.args[0] as String
+                            if (key == "encrypted_config" || key == "license_key" ||
+                                key == "is_pro_verified" || key == "plan_name" ||
+                                key == "expires_at" || key == "whitelist_channels") {
+                                param.result = param.thisObject
+                            }
+                        }
+                    })
+                XposedBridge.log("$TAG: EditorImpl.remove hooked (protect license keys)")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: remove hook failed: $t")
+            }
+        }
     }
 
     private fun hookAppOnCreate(cl: ClassLoader) {
@@ -49,8 +166,8 @@ class MainHook : IXposedHookLoadPackage {
             val appClass = cl.loadClass("com.waenhancer.App")
             XposedHelpers.findAndHookMethod(appClass, "onCreate",
                 object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        XposedBridge.log("$TAG: App.onCreate fired")
+                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        XposedBridge.log("$TAG: App.onCreate BEFORE - installing ProHelper hooks")
                         hookProHelperSafe(cl)
                     }
                 })
@@ -59,6 +176,8 @@ class MainHook : IXposedHookLoadPackage {
             hookProHelperSafe(cl)
         }
     }
+
+    private var proHelperHooked = false
 
     private fun hookProHelperSafe(cl: ClassLoader) {
         if (proHelperHooked) return
@@ -146,21 +265,18 @@ class MainHook : IXposedHookLoadPackage {
     private fun hookProHelper(proHelper: Class<*>, cl: ClassLoader) {
         XposedBridge.log("$TAG: Hooking ProHelper: ${proHelper.name}")
 
-        // isProEnabled() -> true
-        // isPillDesignProEnabled() -> true
-        // isFilterItemsProEnabled() -> true
+        // Hook all no-arg boolean methods -> true (isProEnabled, isPillDesignProEnabled, etc)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE && m.parameterTypes.isEmpty()) {
                 try { XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true)) } catch (_: Throwable) {}
             }
         }
 
-        // getProStatus() -> "ACTIVE"
-        // getProPlanName() -> "Pro Active"
+        // Hook all no-arg String methods -> ACTIVE/Pro Active
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java && m.parameterTypes.isEmpty()) {
                 try {
-                    val result = if (m.name.contains("Status", true)) "ACTIVE" else "Pro Active"
+                    val result = if (m.name.contains("Status", true) || m.name == "n") "ACTIVE" else "Pro Yearly"
                     XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(result))
                 } catch (_: Throwable) {}
             }
@@ -174,7 +290,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // getDecryptedConfig() -> fake config with hooks
+        // getDecryptedConfig() -> fake config with all hooks + beta channel
         for (m in proHelper.declaredMethods) {
             if (m.returnType == JSONObject::class.java && m.parameterTypes.isEmpty()) {
                 try {
@@ -183,12 +299,12 @@ class MainHook : IXposedHookLoadPackage {
                             return buildFakeConfig()
                         }
                     })
+                    XposedBridge.log("$TAG: getDecryptedConfig -> fake config")
                 } catch (_: Throwable) {}
             }
         }
 
-        // getHookStringSafely(String) -> passthrough so updatePreferences
-        // never sees null and never sets "Disabled by Server"
+        // String(String) methods -> passthrough (getHookStringSafely never returns null)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
@@ -202,17 +318,14 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // isProFeature(String) -> true
-        // isLimitedFreePreferenceEnabled(String) -> false  (prevents "Limited Free" badge)
-        // isLimitedFreeHookEnabled(String) -> false
-        // Both isProFeature and isLimitedFreePreferenceEnabled have signature boolean(String)
-        // We hook them by name to differentiate
+        // boolean(String) methods -> differentiate by name
+        // isProFeature -> true, isLimitedFreePreferenceEnabled/isLimitedFreeHookEnabled -> false
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
                 val name = m.name
                 try {
-                    if (name.contains("LimitedFree") || name.contains("limitedFree")) {
+                    if (name.contains("LimitedFree") || name.contains("limitedFree") || name == "s") {
                         XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(false))
                         XposedBridge.log("$TAG: $name(String) -> false (no Limited Free)")
                     } else {
@@ -223,11 +336,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // updatePreferences(Context, PreferenceGroup) -> no-op
-        // This method is what generates "Plugin Required", "Disabled by Server",
-        // "verify license key", "Limited Free" badges, and disables preferences.
-        // By making it a no-op, none of those UI states are ever generated.
-        // All preferences stay in their default enabled state.
+        // updatePreferences -> no-op (prevents all lock/disable/badge logic)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == Void.TYPE && m.parameterTypes.size == 2) {
                 val params = m.parameterTypes
@@ -239,21 +348,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook LicenseManager.silentCheck -> no-op
-        try {
-            val lmClass = cl.loadClass("com.waenhancer.xposed.utils.LicenseManager")
-            for (m in lmClass.declaredMethods) {
-                if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                    XposedBridge.log("$TAG: LicenseManager.silentCheck -> no-op")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // Hook ProSwitchPreference.onClick -> bypass license redirect
-        // The original checks is_pro_verified and if false, opens LicenseActivity
-        // By replacing onClick with no-op + calling super, the toggle works directly
+        // Hook ProSwitchPreference.onClick -> no-op (direct toggle, no LicenseActivity redirect)
         try {
             val pspClass = cl.loadClass("com.waenhancer.preference.ProSwitchPreference")
             for (m in pspClass.declaredMethods) {
@@ -269,94 +364,17 @@ class MainHook : IXposedHookLoadPackage {
             }
         } catch (_: Throwable) {}
 
-        // Hook ProPreferenceCategory to always show as Pro active
+        // Hook ProPreferenceCategory to skip init (prevents plugin missing badge)
         try {
             val ppcClass = cl.loadClass("com.waenhancer.preference.ProPreferenceCategory")
-            // Hook the init method to prevent "plugin missing" badge
             for (m in ppcClass.declaredMethods) {
-                if (m.name == "init" || m.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java))) {
-                    if (m.returnType == Void.TYPE) {
-                        XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                        XposedBridge.log("$TAG: ProPreferenceCategory init -> no-op")
-                        break
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // Hook ProListPreference.isProActive -> true
-        try {
-            val plpClass = cl.loadClass("com.waenhancer.preference.ProListPreference")
-            for (m in plpClass.declaredMethods) {
-                if (m.name == "isProActive" && m.parameterTypes.isEmpty()) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
-                    XposedBridge.log("$TAG: ProListPreference.isProActive -> true")
+                if (m.returnType == Void.TYPE && m.parameterTypes.size == 1 &&
+                    m.parameterTypes[0].name.contains("Context")) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: ProPreferenceCategory init -> no-op")
                     break
                 }
             }
         } catch (_: Throwable) {}
-    }
-
-    private fun hookSharedPrefsImpl() {
-        val spImpl = try {
-            Class.forName("android.app.SharedPreferencesImpl")
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: SharedPreferencesImpl not found: $t")
-            return
-        }
-
-        try {
-            XposedHelpers.findAndHookMethod(spImpl, "getBoolean",
-                String::class.java, java.lang.Boolean.TYPE,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        val key = param.args[0] as String
-                        if (key == "is_pro_verified") param.result = true
-                    }
-                })
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: getBoolean hook failed: $t")
-        }
-
-        try {
-            XposedHelpers.findAndHookMethod(spImpl, "getString",
-                String::class.java, String::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        val key = param.args[0] as String
-                        when (key) {
-                            "license_key" -> param.result = "PATCHER-UNLOCK-0000"
-                            "plan_name" -> param.result = "Pro Active"
-                            "expires_at" -> param.result = (System.currentTimeMillis() + 315360000000L).toString()
-                            "tg_username" -> param.result = "patcher"
-                        }
-                    }
-                })
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: getString hook failed: $t")
-        }
-
-        val editorImpl = try {
-            Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
-        } catch (_: Throwable) { null }
-
-        if (editorImpl != null) {
-            try {
-                XposedHelpers.findAndHookMethod(editorImpl, "putBoolean",
-                    String::class.java, java.lang.Boolean.TYPE,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            val key = param.args[0] as String
-                            val value = param.args[1] as Boolean
-                            if (key == "is_pro_verified" && !value) {
-                                param.result = param.thisObject
-                            }
-                        }
-                    })
-                XposedBridge.log("$TAG: EditorImpl.putBoolean hooked")
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: putBoolean hook failed: $t")
-            }
-        }
     }
 }
