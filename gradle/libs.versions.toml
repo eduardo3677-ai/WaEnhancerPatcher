@@ -9,4 +9,3 @@ libxposed-legacy = { group = "de.robv.android.xposed", name = "api", version.ref
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }
 kotlinAndroid = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-gropify = { id = "com.highcapable.gropify", version.ref = "gropify" }
