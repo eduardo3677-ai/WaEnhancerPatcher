@@ -1,7 +1,6 @@
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
-    alias(libs.plugins.gropify)
 }
 
 android {
@@ -56,5 +55,4 @@ dependencies {
     implementation(libs.dexkit)
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.android)
-    implementation(libs.gropify)
 }

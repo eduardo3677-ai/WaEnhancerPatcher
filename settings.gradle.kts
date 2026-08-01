@@ -1,3 +1,7 @@
+plugins {
+    id("com.highcapable.gropify") version "1.0.2" apply false
+}
+
 pluginManagement {
     repositories {
         google()
