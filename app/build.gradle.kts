@@ -1,9 +1,6 @@
-import java.util.Base64
-
 plugins {
     alias(libs.plugins.androidApplication)
     alias(libs.plugins.kotlinAndroid)
-    alias(libs.plugins.yukihookapi)
     alias(libs.plugins.gropify)
 }
 
@@ -56,10 +53,8 @@ android {
 
 dependencies {
     compileOnly(libs.yukihookapi.api)
-    ksp(libs.yukihookapi.ksp)
     implementation(libs.dexkit)
     implementation(libs.kavaref.core)
     implementation(libs.kavaref.android)
-    implementation(libs.moshi.companion.api)
     implementation(libs.gropify)
 }
