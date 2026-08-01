@@ -1,9 +1,5 @@
 package com.waenhancer.patcher;
 
-import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
-import android.content.pm.Signature;
-
 import java.lang.reflect.Method;
 import java.security.MessageDigest;
 import java.util.HashSet;
@@ -39,51 +35,11 @@ public class MainHook implements IXposedHookLoadPackage {
         HOOK_KEYS.add("voice_status_prefix");
     }
 
-    private static String obfuscateKey(String input) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] hash = md.digest((input + "WAE_PATCHER_SALT").getBytes("UTF-8"));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < Math.min(hash.length, 16); i++) {
-                sb.append(String.format("%02x", hash[i]));
-            }
-            return sb.toString();
-        } catch (Throwable t) {
-            return Integer.toHexString(input.hashCode());
-        }
-    }
-
-    private static String getModuleSignature(XC_LoadPackage.LoadPackageParam lpparam) {
-        try {
-            PackageInfo pi = lpparam.packageInfo;
-            if (pi == null) {
-                android.content.Context ctx = (android.content.Context) XposedHelpers.callStaticMethod(
-                        XposedHelpers.findClass("android.app.ActivityThread", lpparam.classLoader),
-                        "currentApplication");
-                if (ctx != null) {
-                    pi = ctx.getPackageManager().getPackageInfo(PKG, PackageManager.GET_SIGNATURES);
-                }
-            }
-            if (pi != null && pi.signatures != null && pi.signatures.length > 0) {
-                Signature sig = pi.signatures[0];
-                MessageDigest md = MessageDigest.getInstance("SHA-256");
-                byte[] hash = md.digest(sig.toByteArray());
-                StringBuilder sb = new StringBuilder();
-                for (byte b : hash) sb.append(String.format("%02x", b));
-                return sb.toString().substring(0, 16);
-            }
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to get module signature: " + t);
-        }
-        return "unknown";
-    }
-
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!PKG.equals(lpparam.packageName)) return;
 
-        String moduleSig = getModuleSignature(lpparam);
-        String obfTag = obfuscateKey("waenhancer_patcher:" + moduleSig);
+        String obfTag = computeObfTag();
         XposedBridge.log(TAG + ": [" + obfTag + "] Hooking WaEnhancer to unlock Pro");
 
         ClassLoader cl = lpparam.classLoader;
@@ -95,34 +51,47 @@ public class MainHook implements IXposedHookLoadPackage {
         injectProConfig(cl, obfTag);
     }
 
+    private String computeObfTag() {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest(("waenhancer_patcher_salt").getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < 16; i++) sb.append(String.format("%02x", hash[i]));
+            return sb.toString();
+        } catch (Throwable t) {
+            return "patcher_fallback";
+        }
+    }
+
     private void hookProHelper(ClassLoader cl, String obfTag) {
         try {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
 
-            hookReturnConstant(proHelper, "isProEnabled", true);
-            XposedBridge.log(TAG + ": [" + obfTag + "] isProEnabled -> true");
+            try { XposedBridge.findAndHookMethod(proHelper, "isProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedBridge.findAndHookMethod(proHelper, "getProStatus", XC_MethodReplacement.returnConstant("ACTIVE")); } catch (Throwable ignored) {}
+            try { XposedBridge.findAndHookMethod(proHelper, "getProPlanName", XC_MethodReplacement.returnConstant("Pro Active")); } catch (Throwable ignored) {}
+            try { XposedBridge.findAndHookMethod(proHelper, "isProFeature", String.class, XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedBridge.findAndHookMethod(proHelper, "isPillDesignProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedBridge.findAndHookMethod(proHelper, "isFilterItemsProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
 
-            hookReturnConstant(proHelper, "getProStatus", "ACTIVE");
-            XposedBridge.log(TAG + ": [" + obfTag + "] getProStatus -> ACTIVE");
+            try {
+                XposedBridge.findAndHookMethod(proHelper, "setForceFree",
+                        boolean.class, XC_MethodReplacement.DO_NOTHING);
+            } catch (Throwable ignored) {}
 
-            hookReturnConstant(proHelper, "getProPlanName", "Pro Active");
-            hookReturnConstant(proHelper, "isProFeature", String.class, true);
-            hookReturnConstant(proHelper, "isPillDesignProEnabled", true);
-            hookReturnConstant(proHelper, "isFilterItemsProEnabled", true);
+            try {
+                XposedBridge.findAndHookMethod(proHelper, "getHookStringSafely",
+                        String.class, new XC_MethodReplacement() {
+                            @Override
+                            protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                                String hookKey = (String) param.args[0];
+                                if (hookKey == null) return null;
+                                return hookKey + "_" + obfTag;
+                            }
+                        });
+            } catch (Throwable ignored) {}
 
-            XposedBridge.findAndHookMethod(proHelper, "setForceFree",
-                    boolean.class, XC_MethodReplacement.DO_NOTHING);
-
-            XposedBridge.findAndHookMethod(proHelper, "getHookStringSafely",
-                    String.class, new XC_MethodReplacement() {
-                        @Override
-                        protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
-                            String hookKey = (String) param.args[0];
-                            if (hookKey == null) return null;
-                            return hookKey + "_" + obfTag;
-                        }
-                    });
-
+            XposedBridge.log(TAG + ": ProHelper hooks installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": ProHelper hook error: " + t);
         }
@@ -152,7 +121,7 @@ public class MainHook implements IXposedHookLoadPackage {
                 Class<?> listenerClass = Class.forName(
                         "com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl);
                 XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
-                        android.content.Context.class, listenerClass,
+                        Class.forName("android.content.Context"), listenerClass,
                         XC_MethodReplacement.DO_NOTHING);
                 XposedBridge.log(TAG + ": LicenseManager.silentCheck -> no-op");
             } catch (Throwable ignored) {}
@@ -194,24 +163,12 @@ public class MainHook implements IXposedHookLoadPackage {
                             }
                             config.put("hooks", hooks);
                             config.put("pill_design_pro_enabled", true);
-                            XposedBridge.log(TAG + ": Injected config with " + hooks.length() + " hooks");
                             return config;
                         }
                     });
+            XposedBridge.log(TAG + ": Config injection installed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": Config injection error: " + t);
         }
-    }
-
-    private void hookReturnConstant(Class<?> cls, String methodName, Object returnValue) {
-        try {
-            XposedBridge.findAndHookMethod(cls, methodName, XC_MethodReplacement.returnConstant(returnValue));
-        } catch (Throwable ignored) {}
-    }
-
-    private void hookReturnConstant(Class<?> cls, String methodName, Class<?> paramType, Object returnValue) {
-        try {
-            XposedBridge.findAndHookMethod(cls, methodName, paramType, XC_MethodReplacement.returnConstant(returnValue));
-        } catch (Throwable ignored) {}
     }
 }
