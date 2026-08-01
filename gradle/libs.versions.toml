@@ -5,13 +5,13 @@ yukihookapi = "1.3.2"
 dexkit = "2.2.0"
 kavaref = "1.0.3"
 gropify = "1.0.2"
+xposed-legacy = "82"
 
 [libraries]
 yukihookapi-api = { module = "com.highcapable.yukihookapi:api", version.ref = "yukihookapi" }
-yukihookapi-ksp = { module = "com.highcapable.yukihookapi:ksp-xposed", version.ref = "yukihookapi" }
+libxposed-legacy = { group = "de.robv.android.xposed", name = "api", version.ref = "xposed-legacy" }
 dexkit = { module = "org.luckypray:dexkit", version.ref = "dexkit" }
 kavaref-core = { module = "com.highcapable.kavaref:kavaref-core", version.ref = "kavaref" }
-gropify = { module = "com.highcapable.gropify:gropify", version.ref = "gropify" }
 
 [plugins]
 androidApplication = { id = "com.android.application", version.ref = "agp" }

@@ -1,10 +1,5 @@
 package com.waenhancer.patcher
 
-import com.highcapable.yukihookapi.annotation.xposed.InjectYukiHookWithXposed
-import com.highcapable.yukihookapi.hook.core.YukiMember
-import com.highcapable.yukihookapi.hook.factory.config
-import com.highcapable.yukihookapi.hook.core.api.compat.YukiHookHelper
-import com.highcapable.yukihookapi.hook.param.HookParam
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XC_MethodReplacement
@@ -12,7 +7,69 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.json.JSONObject
-import java.lang.reflect.Method
+import org.luckypray.dexkit.DexKitBridge
+
+object ProConfig {
+    val hookKeys = setOf(
+        "message_bomber", "delete_message_file", "pro_status_splitter",
+        "customize_status_control_class", "always_typing_global",
+        "send_audio_as_voice_status", "file_size_spoofer",
+        "filter_group_members_messages", "unlock_premium_customization",
+        "recover_deleted_media", "license_verify", "filter_items",
+        "voice_status_validator_str", "voice_status_prefix"
+    )
+
+    fun build(): JSONObject = JSONObject().apply {
+        put("hooks", JSONObject().apply {
+            hookKeys.forEach { put(it, it) }
+        })
+        put("pill_design_pro_enabled", true)
+    }
+}
+
+object DexKitFinder {
+    private var bridge: DexKitBridge? = null
+
+    fun init(apkPath: String): Boolean {
+        return try {
+            bridge = DexKitBridge.createDexKit(apkPath)
+            true
+        } catch (t: Throwable) {
+            XposedBridge.log("WAE-Patcher: DexKit init failed: $t")
+            false
+        }
+    }
+
+    fun findClassByStrings(vararg strings: String): String? {
+        val b = bridge ?: return null
+        return try {
+            val results = b.findClasses {
+                matcher = matcher {
+                    strings.forEach { usingStrings(it) }
+                }
+            }
+            results.firstOrNull()?.name
+        } catch (t: Throwable) {
+            XposedBridge.log("WAE-Patcher: findClass failed: $t")
+            null
+        }
+    }
+
+    fun findMethodByStrings(vararg strings: String): Pair<String, String>? {
+        val b = bridge ?: return null
+        return try {
+            val results = b.findMethods {
+                matcher = matcher {
+                    strings.forEach { usingStrings(it) }
+                }
+            }
+            results.firstOrNull()?.let { it.className to it.methodName }
+        } catch (t: Throwable) {
+            XposedBridge.log("WAE-Patcher: findMethod failed: $t")
+            null
+        }
+    }
+}
 
 class MainHook : IXposedHookLoadPackage {
 
@@ -31,7 +88,7 @@ class MainHook : IXposedHookLoadPackage {
         if (apkPath != null && DexKitFinder.init(apkPath)) {
             XposedBridge.log("$TAG: DexKit initialized at $apkPath")
         } else {
-            XposedBridge.log("$TAG: DexKit failed, falling back to direct hooks")
+            XposedBridge.log("$TAG: DexKit failed, falling back")
         }
 
         hookProHelper(cl)
@@ -57,25 +114,24 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun hookProHelper(cl: ClassLoader) {
-        // Try to find ProHelper via DexKit using its unique strings
         val className = DexKitFinder.findClassByStrings(
             "is_pro_verified", "encrypted_config", "Disabled by Server"
         )
 
-        val proHelper = try {
+        @Suppress("UNCHECKED_CAST")
+        val proHelper: Class<*> = try {
             if (className != null) {
                 XposedBridge.log("$TAG: ProHelper found via DexKit: $className")
                 cl.loadClass(className)
             } else {
-                XposedBridge.log("$TAG: ProHelper not found via DexKit, trying direct name")
                 cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
             }
         } catch (t: Throwable) {
-            XposedBridge.log("$TAG: ProHelper class not found: $t")
+            XposedBridge.log("$TAG: ProHelper not found: $t")
             return
         }
 
-        // Hook all no-arg boolean methods -> true (isProEnabled, isPillDesignProEnabled, etc)
+        // Hook all no-arg boolean methods -> true
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE && m.parameterTypes.isEmpty()) {
                 try {
@@ -85,13 +141,11 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook all no-arg String methods that could be getProStatus/getProPlanName
+        // Hook all no-arg String methods -> ACTIVE or Pro Active
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java && m.parameterTypes.isEmpty()) {
                 try {
-                    val name = m.name
-                    val result = if (name.contains("Status") || name.contains("status")) "ACTIVE"
-                                 else "Pro Active"
+                    val result = if (m.name.contains("Status") || m.name.contains("status")) "ACTIVE" else "Pro Active"
                     XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(result))
                     XposedBridge.log("$TAG: Hooked ${m.name}() -> $result")
                 } catch (_: Throwable) {}
@@ -101,7 +155,7 @@ class MainHook : IXposedHookLoadPackage {
         // Hook setForceFree(boolean) -> no-op
         for (m in proHelper.declaredMethods) {
             if (m.returnType == Void.TYPE &&
-                m.parameterTypes.contentEquals(arrayOf(java.lang.Boolean.TYPE)) {
+                m.parameterTypes.contentEquals(arrayOf(java.lang.Boolean.TYPE))) {
                 try {
                     XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
                     XposedBridge.log("$TAG: Hooked ${m.name}(boolean) -> no-op")
@@ -123,12 +177,11 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook getHookStringSafely(String) -> return key
+        // Hook getHookStringSafely(String) -> passthrough
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java)) &&
-                m.name != "isProFeature" &&
-                !m.name.contains("plan")) {
+                m.returnType != java.lang.Boolean.TYPE) {
                 try {
                     XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
                         override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any {
@@ -175,20 +228,6 @@ class MainHook : IXposedHookLoadPackage {
                 }
             })
 
-        // Prevent is_pro_verified from being set to false
-        XposedBridge.hookAllMethods(
-            Class.forName("android.app.SharedPreferencesImpl\$EditorImpl"),
-            "putBoolean",
-            object : XC_MethodHook() {
-                override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                    val key = param.args[0] as String
-                    val value = param.args[1] as Boolean
-                    if (key == "is_pro_verified" && !value) {
-                        param.result = param.thisObject
-                    }
-                }
-            })
-
         XposedBridge.log("$TAG: SharedPreferences hooks installed")
     }
 
@@ -212,7 +251,6 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun hookLicenseManager(cl: ClassLoader) {
-        // Find via DexKit: "silentCheck" or license-related strings
         val result = DexKitFinder.findMethodByStrings("silentCheck")
         if (result != null) {
             try {
@@ -227,6 +265,6 @@ class MainHook : IXposedHookLoadPackage {
                 }
             } catch (_: Throwable) {}
         }
-        XposedBridge.log("$TAG: LicenseManager hook skipped (not found)")
+        XposedBridge.log("$TAG: LicenseManager hook skipped")
     }
 }
