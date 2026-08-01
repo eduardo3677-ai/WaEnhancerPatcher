@@ -223,23 +223,6 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // isPluginInstalled(Context) -> true
-        // isPluginPackageInstalled(Context) -> true
-        // getPluginMinWaexVersion(Context) -> 0
-        for (m in proHelper.declaredMethods) {
-            if (m.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java))) {
-                val name = m.name
-                try {
-                    if (m.returnType == java.lang.Boolean.TYPE) {
-                        XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
-                        XposedBridge.log("$TAG: $name(Context) -> true")
-                    } else if (m.returnType == Integer.TYPE && name.contains("MinVersion")) {
-                        XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(0))
-                    }
-                } catch (_: Throwable) {}
-            }
-        }
-
         // updatePreferences(Context, PreferenceGroup) -> no-op
         // This method is what generates "Plugin Required", "Disabled by Server",
         // "verify license key", "Limited Free" badges, and disables preferences.
