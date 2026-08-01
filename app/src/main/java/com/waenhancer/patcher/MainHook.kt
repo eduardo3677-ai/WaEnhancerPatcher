@@ -7,13 +7,6 @@ import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage
 import org.json.JSONObject
-import org.luckypray.dexkit.DexKitBridge
-import org.luckypray.dexkit.query.FindClass
-import org.luckypray.dexkit.query.FindMethod
-import org.luckypray.dexkit.query.matchers.ClassMatcher
-import org.luckypray.dexkit.query.matchers.MethodMatcher
-import org.luckypray.dexkit.query.matchers.StringMatcher
-import org.luckypray.dexkit.query.StringMatchType
 
 class MainHook : IXposedHookLoadPackage {
 
@@ -30,68 +23,6 @@ class MainHook : IXposedHookLoadPackage {
             "voice_status_validator_str", "voice_status_prefix"
         )
 
-        private var dexKit: DexKitBridge? = null
-
-        private fun initDexKit(apkPath: String): Boolean {
-            return try {
-                synchronized(DexKitBridge::class.java) {
-                    dexKit = DexKitBridge.createDexKit(apkPath)
-                }
-                true
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: DexKit init failed: $t")
-                false
-            }
-        }
-
-        private fun findClassByStrings(cl: ClassLoader, vararg strings: String): Class<*>? {
-            val b = dexKit ?: return null
-            return try {
-                val query = FindClass()
-                val matcher = ClassMatcher()
-                for (s in strings) {
-                    val sm = StringMatcher()
-                    sm.value = s
-                    sm.matchType = StringMatchType.Contains
-                    matcher.addUsingString(sm)
-                }
-                query.matcher = matcher
-                val results = b.findClasses(query)
-                val name = results.firstOrNull()?.name ?: return null
-                XposedBridge.log("$TAG: Found class via DexKit: $name")
-                cl.loadClass(name)
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: findClass failed: $t")
-                null
-            }
-        }
-
-        private fun findMethodByStrings(cl: ClassLoader, vararg strings: String): java.lang.reflect.Method? {
-            val b = dexKit ?: return null
-            return try {
-                val query = FindMethod()
-                val matcher = MethodMatcher()
-                for (s in strings) {
-                    val sm = StringMatcher()
-                    sm.value = s
-                    sm.matchType = StringMatchType.Contains
-                    matcher.addUsingString(sm)
-                }
-                query.matcher = matcher
-                val results = b.findMethods(query)
-                val data = results.firstOrNull() ?: return null
-                XposedBridge.log("$TAG: Found method via DexKit: ${data.className}.${data.methodName}")
-                val cls = cl.loadClass(data.className)
-                for (m in cls.declaredMethods) {
-                    if (m.name == data.methodName) return m
-                }
-                null
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: findMethod failed: $t")
-                null
-            }
-        }
-
         private fun buildFakeConfig(): JSONObject = JSONObject().apply {
             put("hooks", JSONObject().apply {
                 HOOK_KEYS.forEach { put(it, it) }
@@ -104,12 +35,7 @@ class MainHook : IXposedHookLoadPackage {
         if (lpparam.packageName != PKG) return
 
         XposedBridge.log("$TAG: Starting hooks")
-
         val cl = lpparam.classLoader
-        val apkPath = getApkPath(cl)
-        if (apkPath != null && initDexKit(apkPath)) {
-            XposedBridge.log("$TAG: DexKit initialized")
-        }
 
         hookProHelper(cl)
         hookSharedPrefs()
@@ -117,29 +43,18 @@ class MainHook : IXposedHookLoadPackage {
         hookLicenseManager(cl)
     }
 
-    private fun getApkPath(cl: ClassLoader): String? {
-        return try {
-            cl.loadClass("com.waenhancer.App")
-                .protectionDomain
-                .codeSource
-                .location
-                .path
-        } catch (t: Throwable) {
-            try {
-                val pm = android.app.AppGlobals.getInitialApplication().packageManager
-                pm.getApplicationInfo(PKG, 0).sourceDir
-            } catch (t2: Throwable) { null }
-        }
-    }
-
     private fun hookProHelper(cl: ClassLoader) {
-        val proHelper = findClassByStrings(cl, "is_pro_verified", "encrypted_config", "Disabled by Server")
-            ?: try {
-                cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: ProHelper not found: $t")
-                return
-            }
+        val proHelper = try {
+            cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: ProHelper not found by name, searching...")
+            searchProHelper(cl)
+        }
+
+        if (proHelper == null) {
+            XposedBridge.log("$TAG: ProHelper not found, framework hooks only")
+            return
+        }
 
         XposedBridge.log("$TAG: ProHelper: ${proHelper.name}")
 
@@ -214,6 +129,61 @@ class MainHook : IXposedHookLoadPackage {
         }
     }
 
+    private fun searchProHelper(cl: ClassLoader): Class<*>? {
+        // Try common obfuscated package names
+        val packages = arrayOf("com.waenhancer.xposed.utils", "Z", "z", "a", "b")
+        for (pkg in packages) {
+            try {
+                // Scan dex entries via reflection on DexFile
+                val dexPathList = getFieldObject(cl.javaClass.superclass, cl, "pathList")
+                    ?: getFieldObject(cl.javaClass, cl, "pathList")
+                    ?: continue
+                val dexElements = getFieldObject(dexPathList.javaClass, dexPathList, "dexElements") as? Array<*>
+                    ?: continue
+                for (element in dexElements) {
+                    val dexFile = getFieldObject(element!!.javaClass, element, "dexFile") ?: continue
+                    val entries = dexFile.javaClass.getMethod("entries").invoke(dexFile) as java.util.Enumeration<String>
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        if (!entry.startsWith("$pkg.")) continue
+                        try {
+                            val cls = cl.loadClass(entry)
+                            if (isProHelper(cls)) return cls
+                        } catch (_: Throwable) {}
+                    }
+                }
+            } catch (_: Throwable) {}
+        }
+        return null
+    }
+
+    private fun isProHelper(cls: Class<*>): Boolean {
+        try {
+            for (m in cls.declaredMethods) {
+                val name = m.name
+                if (name == "isProEnabled" || name == "getProStatus" || name == "getProPlanName" ||
+                    name == "isProFeature" || name == "setForceFree" || name == "getDecryptedConfig") {
+                    return true
+                }
+            }
+        } catch (_: Throwable) {}
+        return false
+    }
+
+    private fun getFieldObject(cls: Class<*>, obj: Any, fieldName: String): Any? {
+        return try {
+            val field = cls.getDeclaredField(fieldName)
+            field.isAccessible = true
+            field.get(obj)
+        } catch (_: Throwable) {
+            try {
+                val field = obj.javaClass.getDeclaredField(fieldName)
+                field.isAccessible = true
+                field.get(obj)
+            } catch (_: Throwable) { null }
+        }
+    }
+
     private fun hookSharedPrefs() {
         XposedBridge.hookAllMethods(android.content.SharedPreferences::class.java, "getBoolean",
             object : XC_MethodHook() {
@@ -258,12 +228,17 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun hookLicenseManager(cl: ClassLoader) {
-        val method = findMethodByStrings(cl, "silentCheck")
-        if (method != null) {
-            try {
-                XposedBridge.hookMethod(method, XC_MethodReplacement.DO_NOTHING)
-                XposedBridge.log("$TAG: LicenseManager.silentCheck -> no-op")
-            } catch (_: Throwable) {}
+        try {
+            val cls = cl.loadClass("com.waenhancer.xposed.utils.LicenseManager")
+            for (m in cls.declaredMethods) {
+                if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: LicenseManager.silentCheck -> no-op")
+                    return
+                }
+            }
+        } catch (_: Throwable) {
+            XposedBridge.log("$TAG: LicenseManager not found by name")
         }
     }
 }

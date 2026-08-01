@@ -52,7 +52,4 @@ android {
 
 dependencies {
     compileOnly(libs.libxposed.legacy)
-    compileOnly(libs.yukihookapi.api)
-    implementation(libs.dexkit)
-    implementation(libs.kavaref.core)
 }
