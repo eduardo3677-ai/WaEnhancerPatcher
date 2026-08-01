@@ -77,7 +77,7 @@ class MainHook : IXposedHookLoadPackage {
             XposedBridge.log("$TAG: getBoolean hook failed: $t")
         }
 
-        // getString: inject valid license data
+        // getString: inject valid license data + block downgrade messages
         try {
             XposedHelpers.findAndHookMethod(spImpl, "getString",
                 String::class.java, String::class.java,
@@ -91,6 +91,8 @@ class MainHook : IXposedHookLoadPackage {
                             "tg_username" -> param.result = "patcher"
                             "whitelist_channels" -> param.result = "beta,stable"
                             "encrypted_config" -> param.result = null
+                            // Block downgrade messages from showing
+                            "pending_downgrade_reason_msg" -> param.result = null
                         }
                     }
                 })
@@ -360,6 +362,34 @@ class MainHook : IXposedHookLoadPackage {
                     })
                     XposedBridge.log("$TAG: ProSwitchPreference.onClick -> bypassed")
                     break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook Utils.handleSubscriptionDowngrade -> no-op (prevents downgrade notification)
+        try {
+            val utilsClass = cl.loadClass("com.waenhancer.xposed.utils.Utils")
+            for (m in utilsClass.declaredMethods) {
+                if (m.name == "handleSubscriptionDowngrade" && m.parameterTypes.size == 2) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: Utils.handleSubscriptionDowngrade -> no-op")
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook MainActivity.showDowngradeBottomSheet -> no-op (prevents downgrade UI)
+        try {
+            val maClass = cl.loadClass("com.waenhancer.activities.MainActivity")
+            for (m in maClass.declaredMethods) {
+                if (m.name == "showDowngradeBottomSheet") {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: MainActivity.showDowngradeBottomSheet -> no-op")
+                    break
+                }
+                if (m.name == "showReversionBottomSheet") {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    XposedBridge.log("$TAG: MainActivity.showReversionBottomSheet -> no-op")
                 }
             }
         } catch (_: Throwable) {}
