@@ -67,20 +67,20 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
 
-            try { XposedBridge.findAndHookMethod(proHelper, "isProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
-            try { XposedBridge.findAndHookMethod(proHelper, "getProStatus", XC_MethodReplacement.returnConstant("ACTIVE")); } catch (Throwable ignored) {}
-            try { XposedBridge.findAndHookMethod(proHelper, "getProPlanName", XC_MethodReplacement.returnConstant("Pro Active")); } catch (Throwable ignored) {}
-            try { XposedBridge.findAndHookMethod(proHelper, "isProFeature", String.class, XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
-            try { XposedBridge.findAndHookMethod(proHelper, "isPillDesignProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
-            try { XposedBridge.findAndHookMethod(proHelper, "isFilterItemsProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "isProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "getProStatus", XC_MethodReplacement.returnConstant("ACTIVE")); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "getProPlanName", XC_MethodReplacement.returnConstant("Pro Active")); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "isProFeature", String.class, XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "isPillDesignProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
+            try { XposedHelpers.findAndHookMethod(proHelper, "isFilterItemsProEnabled", XC_MethodReplacement.returnConstant(true)); } catch (Throwable ignored) {}
 
             try {
-                XposedBridge.findAndHookMethod(proHelper, "setForceFree",
+                XposedHelpers.findAndHookMethod(proHelper, "setForceFree",
                         boolean.class, XC_MethodReplacement.DO_NOTHING);
             } catch (Throwable ignored) {}
 
             try {
-                XposedBridge.findAndHookMethod(proHelper, "getHookStringSafely",
+                XposedHelpers.findAndHookMethod(proHelper, "getHookStringSafely",
                         String.class, new XC_MethodReplacement() {
                             @Override
                             protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
@@ -100,7 +100,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private void hookApp(ClassLoader cl) {
         try {
             Class<?> app = XposedHelpers.findClass("com.waenhancer.App", cl);
-            XposedBridge.findAndHookMethod(app, "onCreate",
+            XposedHelpers.findAndHookMethod(app, "onCreate",
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
@@ -120,7 +120,7 @@ public class MainHook implements IXposedHookLoadPackage {
             try {
                 Class<?> listenerClass = Class.forName(
                         "com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl);
-                XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
+                XposedHelpers.findAndHookMethod(licenseManager, "silentCheck",
                         android.content.Context.class, listenerClass,
                         XC_MethodReplacement.DO_NOTHING);
                 XposedBridge.log(TAG + ": LicenseManager.silentCheck -> no-op");
@@ -134,7 +134,7 @@ public class MainHook implements IXposedHookLoadPackage {
         try {
             Class<?> proSwitch = XposedHelpers.findClass(
                     "com.waenhancer.preference.ProSwitchPreference", cl);
-            XposedBridge.findAndHookMethod(proSwitch, "onClick",
+            XposedHelpers.findAndHookMethod(proSwitch, "onClick",
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
@@ -152,7 +152,7 @@ public class MainHook implements IXposedHookLoadPackage {
     private void injectProConfig(ClassLoader cl, String obfTag) {
         try {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
-            XposedBridge.findAndHookMethod(proHelper, "getDecryptedConfig",
+            XposedHelpers.findAndHookMethod(proHelper, "getDecryptedConfig",
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
