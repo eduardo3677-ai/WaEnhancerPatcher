@@ -1,5 +1,9 @@
 package com.waenhancer.patcher;
 
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
+
 import de.robv.android.xposed.IXposedHookLoadPackage;
 import de.robv.android.xposed.XC_MethodReplacement;
 import de.robv.android.xposed.XposedBridge;
@@ -7,121 +11,138 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 import java.lang.reflect.Method;
+import java.security.MessageDigest;
+import java.util.HashSet;
+import java.util.Set;
 
 public class MainHook implements IXposedHookLoadPackage {
 
     private static final String TAG = "WAE-Patcher";
     private static final String PRO_HELPER = "com.waenhancer.xposed.utils.ProHelper";
     private static final String PKG = "com.waenhancer";
+    private static final Set<String> HOOK_KEYS = new HashSet<>();
+
+    static {
+        HOOK_KEYS.add("message_bomber");
+        HOOK_KEYS.add("delete_message_file");
+        HOOK_KEYS.add("pro_status_splitter");
+        HOOK_KEYS.add("customize_status_control_class");
+        HOOK_KEYS.add("always_typing_global");
+        HOOK_KEYS.add("send_audio_as_voice_status");
+        HOOK_KEYS.add("file_size_spoofer");
+        HOOK_KEYS.add("filter_group_members_messages");
+        HOOK_KEYS.add("unlock_premium_customization");
+        HOOK_KEYS.add("recover_deleted_media");
+        HOOK_KEYS.add("license_verify");
+        HOOK_KEYS.add("filter_items");
+        HOOK_KEYS.add("voice_status_validator_str");
+        HOOK_KEYS.add("voice_status_prefix");
+    }
+
+    private static String obfuscateKey(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] hash = md.digest((input + "WAE_PATCHER_SALT").getBytes("UTF-8"));
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < Math.min(hash.length, 16); i++) {
+                sb.append(String.format("%02x", hash[i]));
+            }
+            return sb.toString();
+        } catch (Throwable t) {
+            return Integer.toHexString(input.hashCode());
+        }
+    }
+
+    private static String getModuleSignature(XC_LoadPackage.LoadPackageParam lpparam) {
+        try {
+            PackageInfo pi = android.app.AppGlobals.getInitialPackageInfo(PKG);
+            if (pi == null) {
+                PackageManager pm = android.app.AppGlobals.getInitialApplication().getPackageManager();
+                pi = pm.getPackageInfo(PKG, PackageManager.GET_SIGNATURES);
+            }
+            if (pi != null && pi.signatures != null && pi.signatures.length > 0) {
+                Signature sig = pi.signatures[0];
+                MessageDigest md = MessageDigest.getInstance("SHA-256");
+                byte[] hash = md.digest(sig.toByteArray());
+                StringBuilder sb = new StringBuilder();
+                for (byte b : hash) sb.append(String.format("%02x", b));
+                return sb.toString().substring(0, 16);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": Failed to get module signature: " + t);
+        }
+        return "unknown";
+    }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpparam) throws Throwable {
         if (!PKG.equals(lpparam.packageName)) return;
 
-        XposedBridge.log(TAG + ": Hooking WaEnhancer to unlock all Pro features");
+        String moduleSig = getModuleSignature(lpparam);
+        String obfTag = obfuscateKey("waenhancer_patcher:" + moduleSig);
+        XposedBridge.log(TAG + ": [" + obfTag + "] Hooking WaEnhancer to unlock Pro");
 
         ClassLoader cl = lpparam.classLoader;
 
-        hookProHelper(cl);
+        hookProHelper(cl, obfTag);
         hookApp(cl);
         hookLicenseManager(cl);
         hookPreferences(cl);
+        injectProConfig(cl, obfTag);
     }
 
-    private void hookProHelper(ClassLoader cl) {
+    private void hookProHelper(ClassLoader cl, String obfTag) {
         try {
             Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
 
-            // isProEnabled() → true
-            XposedBridge.findAndHookMethod(proHelper, "isProEnabled",
-                    XC_MethodReplacement.returnConstant(true));
-            XposedBridge.log(TAG + ": Hooked isProEnabled → true");
+            hookReturnConstant(proHelper, "isProEnabled", true);
+            XposedBridge.log(TAG + ": [" + obfTag + "] isProEnabled → true");
 
-            // getProStatus() → "ACTIVE"
-            XposedBridge.findAndHookMethod(proHelper, "getProStatus",
-                    XC_MethodReplacement.returnConstant("ACTIVE"));
-            XposedBridge.log(TAG + ": Hooked getProStatus → ACTIVE");
+            hookReturnConstant(proHelper, "getProStatus", "ACTIVE");
+            XposedBridge.log(TAG + ": [" + obfTag + "] getProStatus → ACTIVE");
 
-            // getProPlanName() → "Pro Active"
-            XposedBridge.findAndHookMethod(proHelper, "getProPlanName",
-                    XC_MethodReplacement.returnConstant("Pro Active"));
-            XposedBridge.log(TAG + ": Hooked getProPlanName → Pro Active");
+            hookReturnConstant(proHelper, "getProPlanName", "Pro Active");
 
-            // isPluginInstalled(Context) → true
-            XposedBridge.findAndHookMethod(proHelper, "isPluginInstalled",
-                    android.content.Context.class,
-                    XC_MethodReplacement.returnConstant(true));
-            XposedBridge.log(TAG + ": Hooked isPluginInstalled → true");
+            hookReturnConstant(proHelper, "isPluginInstalled", android.content.Context.class, true);
+            hookReturnConstant(proHelper, "isPluginPackageInstalled", android.content.Context.class, true);
+            hookReturnConstant(proHelper, "isProFeature", String.class, true);
+            hookReturnConstant(proHelper, "isPillDesignProEnabled", true);
+            hookReturnConstant(proHelper, "isFilterItemsProEnabled", true);
 
-            // isPluginPackageInstalled(Context) → true
-            XposedBridge.findAndHookMethod(proHelper, "isPluginPackageInstalled",
-                    android.content.Context.class,
-                    XC_MethodReplacement.returnConstant(true));
-            XposedBridge.log(TAG + ": Hooked isPluginPackageInstalled → true");
-
-            // isProFeature(String) → true for all keys
-            XposedBridge.findAndHookMethod(proHelper, "isProFeature",
-                    String.class,
-                    XC_MethodReplacement.returnConstant(true));
-            XposedBridge.log(TAG + ": Hooked isProFeature → always true");
-
-            // isPillDesignProEnabled() → true
-            XposedBridge.findAndHookMethod(proHelper, "isPillDesignProEnabled",
-                    XC_MethodReplacement.returnConstant(true));
-
-            // isFilterItemsProEnabled() → true
-            XposedBridge.findAndHookMethod(proHelper, "isFilterItemsProEnabled",
-                    XC_MethodReplacement.returnConstant(true));
-
-            // setForceFree(boolean) → no-op (prevent license revocation)
+            // Prevent forceFree revocation
             XposedBridge.findAndHookMethod(proHelper, "setForceFree",
-                    boolean.class,
-                    XC_MethodReplacement.DO_NOTHING);
+                    boolean.class, XC_MethodReplacement.DO_NOTHING);
 
-            // getDecryptedConfig() → inject a fake config with all hook keys
-            XposedBridge.findAndHookMethod(proHelper, "getDecryptedConfig",
-                    new XC_MethodReplacement() {
-                        @Override
-                        protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
-                            return createFakeConfig(cl);
-                        }
-                    });
-
-            // getHookStringSafely(String) → return the hookKey itself as the class name
+            // getHookStringSafely → return hookKey (non-null prevents "Disabled by Server")
             XposedBridge.findAndHookMethod(proHelper, "getHookStringSafely",
-                    String.class,
-                    new XC_MethodReplacement() {
+                    String.class, new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
                             String hookKey = (String) param.args[0];
                             if (hookKey == null) return null;
-                            // Return a non-empty string so updatePreferences doesn't mark it "Disabled by Server"
-                            return hookKey;
+                            return hookKey + "_" + obfTag;
                         }
                     });
 
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook ProHelper: " + t);
+            XposedBridge.log(TAG + ": ProHelper hook error: " + t);
         }
     }
 
     private void hookApp(ClassLoader cl) {
         try {
             Class<?> app = XposedHelpers.findClass("com.waenhancer.App", cl);
-
-            // Hook onCreate to skip license verification and expiration check
+            // Hook onCreate to skip license expiration check
             XposedBridge.findAndHookMethod(app, "onCreate",
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
-                            XposedBridge.log(TAG + ": App.onCreate intercepted, skipping license checks");
-                            // Call the original onCreate but the ProHelper hooks above will prevent revocation
+                            XposedBridge.log(TAG + ": App.onCreate - skipping license checks");
                             return null;
                         }
                     });
-
         } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to hook App: " + t);
+            XposedBridge.log(TAG + ": App hook error: " + t);
         }
     }
 
@@ -131,12 +152,14 @@ public class MainHook implements IXposedHookLoadPackage {
                     "com.waenhancer.xposed.utils.LicenseManager", cl);
 
             // silentCheck → no-op
-            XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
-                    android.content.Context.class,
-                    Class.forName("com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl),
-                    XC_MethodReplacement.DO_NOTHING);
-            XposedBridge.log(TAG + ": Hooked LicenseManager.silentCheck → no-op");
-
+            try {
+                Class<?> listenerClass = Class.forName(
+                        "com.waenhancer.xposed.utils.LicenseManager$SilentCheckListener", false, cl);
+                XposedBridge.findAndHookMethod(licenseManager, "silentCheck",
+                        android.content.Context.class, listenerClass,
+                        XC_MethodReplacement.DO_NOTHING);
+                XposedBridge.log(TAG + ": LicenseManager.silentCheck → no-op");
+            } catch (Throwable ignored) {}
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": LicenseManager hook skipped: " + t.getMessage());
         }
@@ -144,7 +167,6 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private void hookPreferences(ClassLoader cl) {
         try {
-            // ProSwitchPreference.onClick → allow toggle (don't redirect to LicenseActivity)
             Class<?> proSwitch = XposedHelpers.findClass(
                     "com.waenhancer.preference.ProSwitchPreference", cl);
 
@@ -152,64 +174,52 @@ public class MainHook implements IXposedHookLoadPackage {
                     new XC_MethodReplacement() {
                         @Override
                         protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
-                            // Call the parent onClick directly
                             XposedBridge.invokeOriginalMethod(
-                                    ((Method) param.method), param.thisObject, new Object[0]);
+                                    (Method) param.method, param.thisObject, new Object[0]);
                             return null;
                         }
                     });
-            XposedBridge.log(TAG + ": Hooked ProSwitchPreference.onClick → bypass license check");
-
+            XposedBridge.log(TAG + ": ProSwitchPreference.onClick → bypassed");
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": ProSwitchPreference hook skipped: " + t.getMessage());
         }
+    }
 
+    private void injectProConfig(ClassLoader cl, String obfTag) {
         try {
-            // ProPreferenceCategory.init → always show green badge
-            Class<?> proCat = XposedHelpers.findClass(
-                    "com.waenhancer.preference.ProPreferenceCategory", cl);
+            Class<?> proHelper = XposedHelpers.findClass(PRO_HELPER, cl);
 
-            XposedBridge.findAndHookMethod(proCat, "isPluginInstalled",
-                    android.content.Context.class,
-                    XC_MethodReplacement.returnConstant(true));
+            // getDecryptedConfig → injected fake config
+            XposedBridge.findAndHookMethod(proHelper, "getDecryptedConfig",
+                    new XC_MethodReplacement() {
+                        @Override
+                        protected Object replaceHookedMethod(MethodHookParam param) throws Throwable {
+                            org.json.JSONObject config = new org.json.JSONObject();
+                            org.json.JSONObject hooks = new org.json.JSONObject();
+                            for (String key : HOOK_KEYS) {
+                                hooks.put(key, key + "_" + obfTag);
+                            }
+                            config.put("hooks", hooks);
+                            config.put("pill_design_pro_enabled", true);
+                            XposedBridge.log(TAG + ": Injected config with " + hooks.length() + " hooks");
+                            return config;
+                        }
+                    });
 
         } catch (Throwable t) {
-            // ProPreferenceCategory may not have isPluginInstalled, try init
+            XposedBridge.log(TAG + ": Config injection error: " + t);
         }
     }
 
-    private org.json.JSONObject createFakeConfig(ClassLoader cl) {
+    private void hookReturnConstant(Class<?> cls, String methodName, Object returnValue) {
         try {
-            org.json.JSONObject config = new org.json.JSONObject();
-            org.json.JSONObject hooks = new org.json.JSONObject();
+            XposedBridge.findAndHookMethod(cls, methodName, XC_MethodReplacement.returnConstant(returnValue));
+        } catch (Throwable ignored) {}
+    }
 
-            // These are the hook keys that getHookStringSafely() looks up.
-            // The values don't need to be real class names since the features
-            // are implemented directly in the main module (not via plugin).
-            // They just need to be non-empty so updatePreferences doesn't disable them.
-            hooks.put("message_bomber", "com.waenhancer.xposed.features.others.MessageBomber");
-            hooks.put("delete_message_file", "com.waenhancer.xposed.features.others.DeleteMessageFile");
-            hooks.put("pro_status_splitter", "com.waenhancer.xposed.features.others.ProStatusSplitter");
-            hooks.put("customize_status_control_class", "com.waenhancer.xposed.features.others.StatusCustomization");
-            hooks.put("always_typing_global", "com.waenhancer.xposed.features.others.AlwaysTyping");
-            hooks.put("send_audio_as_voice_status", "com.waenhancer.xposed.features.others.SendAudioAsVoiceStatus");
-            hooks.put("file_size_spoofer", "com.waenhancer.xposed.features.media.FileSizeSpoofer");
-            hooks.put("filter_group_members_messages", "com.waenhancer.xposed.features.others.FilterGroupMembersMessages");
-            hooks.put("unlock_premium_customization", "com.waenhancer.xposed.features.others.UnlockPremiumCustomization");
-            hooks.put("recover_deleted_media", "com.waenhancer.xposed.features.others.RecoverDeletedMedia");
-            hooks.put("license_verify", "com.waenhancer.xposed.features.others.AlwaysTyping");
-            hooks.put("filter_items", "com.waenhancer.xposed.features.others.FilterGroupMembersMessages");
-            hooks.put("voice_status_validator_str", "com.waenhancer.xposed.features.others.SendAudioAsVoiceStatus");
-            hooks.put("voice_status_prefix", "voice_status");
-
-            config.put("hooks", hooks);
-            config.put("pill_design_pro_enabled", true);
-
-            XposedBridge.log(TAG + ": Created fake Pro config with " + hooks.length() + " hooks");
-            return config;
-        } catch (Throwable t) {
-            XposedBridge.log(TAG + ": Failed to create fake config: " + t);
-            return null;
-        }
+    private void hookReturnConstant(Class<?> cls, String methodName, Class<?> paramType, Object returnValue) {
+        try {
+            XposedBridge.findAndHookMethod(cls, methodName, paramType, XC_MethodReplacement.returnConstant(returnValue));
+        } catch (Throwable ignored) {}
     }
 }
