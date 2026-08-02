@@ -377,79 +377,140 @@ class MainHook : IXposedHookLoadPackage {
     }
 
     private fun hookSharedPrefsImpl() {
+        // Hook SharedPreferencesImpl (main app process reads through this)
         val spImpl = try {
             Class.forName("android.app.SharedPreferencesImpl")
-        } catch (_: Throwable) { return }
-
-        try {
-            XposedHelpers.findAndHookMethod(spImpl, "getBoolean",
-                String::class.java, java.lang.Boolean.TYPE,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        if (param.args[0] == "is_pro_verified") param.result = true
-                    }
-                })
-        } catch (_: Throwable) {}
-
-        try {
-            XposedHelpers.findAndHookMethod(spImpl, "getString",
-                String::class.java, String::class.java,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        when (param.args[0] as String) {
-                            "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
-                            "plan_name" -> param.result = "Pro Yearly"
-                            "expires_at" -> param.result = "1893456000000"
-                            "tg_username" -> param.result = "patcher"
-                            "whitelist_channels" -> param.result = "beta,stable"
-                            "encrypted_config" -> param.result = null
-                            "pending_downgrade_reason_msg" -> param.result = null
-                        }
-                    }
-                })
-        } catch (_: Throwable) {}
-
-        try {
-            XposedHelpers.findAndHookMethod(spImpl, "getLong",
-                String::class.java, java.lang.Long.TYPE,
-                object : XC_MethodHook() {
-                    override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        if (param.args[0] == "expires_at") param.result = 1893456000000L
-                    }
-                })
-        } catch (_: Throwable) {}
-
-        val editorImpl = try {
-            Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
         } catch (_: Throwable) { null }
 
-        editorImpl?.let { ei ->
+        spImpl?.let { sp ->
             try {
-                XposedHelpers.findAndHookMethod(ei, "putBoolean",
+                XposedHelpers.findAndHookMethod(sp, "getBoolean",
                     String::class.java, java.lang.Boolean.TYPE,
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            if (param.args[0] == "is_pro_verified" && !(param.args[1] as Boolean)) {
-                                param.result = param.thisObject
+                            if (param.args[0] == "is_pro_verified") param.result = true
+                        }
+                    })
+            } catch (_: Throwable) {}
+
+            try {
+                XposedHelpers.findAndHookMethod(sp, "getString",
+                    String::class.java, String::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            when (param.args[0] as String) {
+                                "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
+                                "plan_name" -> param.result = "Pro Yearly"
+                                "expires_at" -> param.result = "1893456000000"
+                                "tg_username" -> param.result = "patcher"
+                                "whitelist_channels" -> param.result = "beta,stable"
+                                "encrypted_config" -> param.result = null
+                                "pending_downgrade_reason_msg" -> param.result = null
                             }
                         }
                     })
             } catch (_: Throwable) {}
 
             try {
-                XposedHelpers.findAndHookMethod(ei, "remove",
-                    String::class.java,
+                XposedHelpers.findAndHookMethod(sp, "getLong",
+                    String::class.java, java.lang.Long.TYPE,
                     object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            if (param.args[0] == "expires_at") param.result = 1893456000000L
+                        }
+                    })
+            } catch (_: Throwable) {}
+
+            val editorImpl = try {
+                Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
+            } catch (_: Throwable) { null }
+
+            editorImpl?.let { ei ->
+                try {
+                    XposedHelpers.findAndHookMethod(ei, "putBoolean",
+                        String::class.java, java.lang.Boolean.TYPE,
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                                if (param.args[0] == "is_pro_verified" && !(param.args[1] as Boolean)) {
+                                    param.result = param.thisObject
+                                }
+                            }
+                        })
+                } catch (_: Throwable) {}
+
+                try {
+                    XposedHelpers.findAndHookMethod(ei, "remove",
+                        String::class.java,
+                        object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
                             val key = param.args[0] as String
                             if (key == "encrypted_config" || key == "license_key" ||
                                 key == "is_pro_verified" || key == "plan_name" ||
-                                key == "expires_at" || key == "whitelist_channels") {
+                                key == "expires_at" || key == "whitelist_channels" ||
+                                key == "tg_username") {
                                 param.result = param.thisObject
                             }
                         }
                     })
-            } catch (_: Throwable) {}
+                } catch (_: Throwable) {}
+            }
+        }
+
+        // Hook XSharedPreferences — ProHelper.getPrefs() returns Utils.xprefs which is XSharedPreferences
+        // This is what getProStatus()/getProPlanName() actually read from
+        try {
+            val xspClass = Class.forName("de.robv.android.xposed.XSharedPreferences")
+            XposedBridge.log("$TAG: Hooking XSharedPreferences")
+
+            try {
+                XposedHelpers.findAndHookMethod(xspClass, "getBoolean",
+                    String::class.java, java.lang.Boolean.TYPE,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            if (param.args[0] == "is_pro_verified") param.result = true
+                        }
+                    })
+                XposedBridge.log("$TAG: XSharedPreferences.getBoolean hooked")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: XSP getBoolean: $t")
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(xspClass, "getString",
+                    String::class.java, String::class.java,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            val key = param.args[0] as String
+                            when (key) {
+                                "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
+                                "plan_name" -> param.result = "Pro Yearly"
+                                "expires_at" -> param.result = "1893456000000"
+                                "tg_username" -> param.result = "patcher"
+                                "whitelist_channels" -> param.result = "beta,stable"
+                                "encrypted_config" -> param.result = null
+                                "pending_downgrade_reason_msg" -> param.result = null
+                            }
+                        }
+                    })
+                XposedBridge.log("$TAG: XSharedPreferences.getString hooked")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: XSP getString: $t")
+            }
+
+            try {
+                XposedHelpers.findAndHookMethod(xspClass, "getLong",
+                    String::class.java, java.lang.Long.TYPE,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            if (param.args[0] == "expires_at") param.result = 1893456000000L
+                        }
+                    })
+                XposedBridge.log("$TAG: XSharedPreferences.getLong hooked")
+            } catch (t: Throwable) {
+                XposedBridge.log("$TAG: XSP getLong: $t")
+            }
+        } catch (t: Throwable) {
+            XposedBridge.log("$TAG: XSharedPreferences class not found: $t")
         }
     }
 }
