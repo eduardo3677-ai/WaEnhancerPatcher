@@ -338,6 +338,19 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
+        // Hook isPluginInstalled(Context) -> true and isPluginPackageInstalled(Context) -> true
+        // Required: ProSwitchPreference.init/onClick calls these directly
+        for (m in proHelper.declaredMethods) {
+            if (m.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java))) {
+                if (m.returnType == java.lang.Boolean.TYPE) {
+                    try {
+                        XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
+                        XposedBridge.log("$TAG: ${m.name}(Context) -> true")
+                    } catch (_: Throwable) {}
+                }
+            }
+        }
+
         // updatePreferences -> no-op (prevents all lock/disable/badge logic)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == Void.TYPE && m.parameterTypes.size == 2) {
@@ -350,21 +363,8 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Hook ProSwitchPreference.onClick -> no-op (direct toggle, no LicenseActivity redirect)
-        try {
-            val pspClass = cl.loadClass("com.waenhancer.preference.ProSwitchPreference")
-            for (m in pspClass.declaredMethods) {
-                if (m.name == "onClick") {
-                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
-                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
-                            return null
-                        }
-                    })
-                    XposedBridge.log("$TAG: ProSwitchPreference.onClick -> bypassed")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
+        // ProSwitchPreference.onClick — let original run, is_pro_verified=true makes it call super.onClick()
+        // No hook needed — the logic checks isPluginInstalled (now true) and is_pro_verified (now true)
 
         // Hook Utils.handleSubscriptionDowngrade -> no-op (prevents downgrade notification)
         try {
