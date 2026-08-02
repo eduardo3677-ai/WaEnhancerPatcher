@@ -204,10 +204,22 @@ class MainHook : IXposedHookLoadPackage {
     private fun hookProHelper(proHelper: Class<*>, cl: ClassLoader) {
         XposedBridge.log("$TAG: Hooking ProHelper")
 
-        // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled)
+        // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled,
+        // isPluginInstalled, isPluginPackageInstalled)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE && m.parameterTypes.isEmpty()) {
                 try { XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true)) } catch (_: Throwable) {}
+            }
+        }
+
+        // boolean(Context) -> true (isPluginInstalled, isPluginPackageInstalled)
+        for (m in proHelper.declaredMethods) {
+            if (m.returnType == java.lang.Boolean.TYPE &&
+                m.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java))) {
+                try {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
+                    XposedBridge.log("$TAG: ${m.name}(Context) -> true")
+                } catch (_: Throwable) {}
             }
         }
 
