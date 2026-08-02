@@ -23,7 +23,6 @@ class MainHook : IXposedHookLoadPackage {
             "voice_status_validator_str", "voice_status_prefix"
         )
 
-        @Suppress("UNCHECKED_CAST")
         private fun buildFakeConfig(): JSONObject = JSONObject().apply {
             put("hooks", JSONObject().apply {
                 HOOK_KEYS.forEach { put(it, it) }
@@ -38,43 +37,34 @@ class MainHook : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != PKG) return
 
-        XposedBridge.log("$TAG: Starting hooks")
+        XposedBridge.log("$TAG: Starting")
         val cl = lpparam.classLoader
 
-        // Defer SharedPreferencesImpl hooks to after Application is created
-        // Hooking too early causes "Failed to write LSPosed marker" error
-        hookAppOnCreate(cl)
-    }
-
-    private fun hookAppOnCreate(cl: ClassLoader) {
+        // Hook App.onCreate to install ProHelper hooks after classes are loaded
         try {
             val appClass = cl.loadClass("com.waenhancer.App")
             XposedHelpers.findAndHookMethod(appClass, "onCreate",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                        XposedBridge.log("$TAG: App.onCreate BEFORE")
-                        hookSharedPrefsImpl()
-                        hookProHelperSafe(cl)
+                        if (!proHelperHooked) {
+                            hookProHelper(cl)
+                            hookLicenseManager(cl)
+                            hookDowngrade(cl)
+                        }
                     }
                 })
-        } catch (t: Throwable) {
-            hookSharedPrefsImpl()
-            hookProHelperSafe(cl)
+        } catch (_: Throwable) {
+            hookProHelper(cl)
+            hookLicenseManager(cl)
+            hookDowngrade(cl)
         }
     }
 
-    private fun hookProHelperSafe(cl: ClassLoader) {
-        if (proHelperHooked) return
-        proHelperHooked = true
-
-        val proHelper = try {
-            cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
-        } catch (t: Throwable) {
-            scanDexForProHelper(cl)
-        }
-
-        if (proHelper == null) return
-        hookProHelper(proHelper, cl)
+    private fun findProHelper(cl: ClassLoader): Class<*>? {
+        // Try direct name first
+        try { return cl.loadClass("com.waenhancer.xposed.utils.ProHelper") } catch (_: Throwable) {}
+        // Scan dex for obfuscated ProHelper
+        return scanDexForProHelper(cl)
     }
 
     private fun scanDexForProHelper(cl: ClassLoader): Class<*>? {
@@ -138,82 +128,28 @@ class MainHook : IXposedHookLoadPackage {
         } catch (_: Throwable) { null }
     }
 
-    private fun hookPluginClasses(pluginLoader: ClassLoader) {
-        // Hook ProConfig.getHookString -> return hookKey (never null)
-        try {
-            val proConfigClass = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
-            for (m in proConfigClass.declaredMethods) {
-                if (m.name == "getHookString" && m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
-                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
-                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any {
-                            return param.args[0] as String
-                        }
-                    })
-                    XposedBridge.log("$TAG: ProConfig.getHookString -> passthrough")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
+    private fun hookProHelper(cl: ClassLoader) {
+        if (proHelperHooked) return
+        proHelperHooked = true
 
-        // Hook ProFeature.nl -> true (native library loaded)
-        try {
-            val proFeatureClass = pluginLoader.loadClass("com.waex.helper.ProFeature")
-            val nlField = proFeatureClass.getDeclaredField("nl")
-            nlField.isAccessible = true
-            nlField.setBoolean(null, true)
-            XposedBridge.log("$TAG: ProFeature.nl -> true")
-        } catch (_: Throwable) {}
+        val proHelper = findProHelper(cl) ?: run {
+            XposedBridge.log("$TAG: ProHelper not found")
+            return
+        }
 
-        // Hook SecurityNative.getBaseUrl -> return a dummy URL
-        try {
-            val secNativeClass = pluginLoader.loadClass("com.waex.helper.utils.SecurityNative")
-            for (m in secNativeClass.declaredMethods) {
-                if (m.name == "getBaseUrl") {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant("https://waex.patcher.local"))
-                    XposedBridge.log("$TAG: SecurityNative.getBaseUrl -> patched")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
+        XposedBridge.log("$TAG: Hooking ProHelper: ${proHelper.name}")
 
-        // Hook ProConfig.loadConfig -> inject fake config
-        try {
-            val proConfigClass = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
-            for (m in proConfigClass.declaredMethods) {
-                if (m.returnType == Void.TYPE && m.parameterTypes.size == 1 &&
-                    m.parameterTypes[0] == String::class.java) {
-                    // loadConfig(String) -> inject our config instead
-                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
-                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
-                            // Set activeConfig directly
-                            try {
-                                val configField = proConfigClass.getDeclaredField("activeConfig")
-                                configField.isAccessible = true
-                                configField.set(null, buildFakeConfig())
-                                XposedBridge.log("$TAG: ProConfig.activeConfig -> fake config injected")
-                            } catch (_: Throwable) {}
-                            return null
-                        }
-                    })
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-    }
-
-    private fun hookProHelper(proHelper: Class<*>, cl: ClassLoader) {
-        XposedBridge.log("$TAG: Hooking ProHelper")
-
-        // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled)
-        // DON'T hook isPluginInstalled/isPluginPackageInstalled — let real values pass
-        // so the app can detect if plugin is missing and offer to download it
+        // Hook all no-arg boolean methods -> true
+        // This covers: isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled
+        // Does NOT affect isPluginInstalled(Context) which takes a Context param
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE && m.parameterTypes.isEmpty()) {
                 try { XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true)) } catch (_: Throwable) {}
             }
         }
 
-        // String() -> ACTIVE / Pro Yearly
+        // Hook all no-arg String methods -> ACTIVE / Pro Yearly
+        // This covers: getProStatus -> "ACTIVE", getProPlanName -> "Pro Yearly"
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java && m.parameterTypes.isEmpty()) {
                 try {
@@ -244,7 +180,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // String(String) -> passthrough (getHookStringSafely never returns null)
+        // String(String) methods -> passthrough (getHookStringSafely never returns null)
         for (m in proHelper.declaredMethods) {
             if (m.returnType == String::class.java &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
@@ -258,12 +194,13 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // boolean(String) -> differentiate isProFeature(true) vs isLimitedFree(false)
+        // boolean(String) methods:
+        // isProFeature -> true, isLimitedFreePreferenceEnabled/isLimitedFreeHookEnabled -> false
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE &&
                 m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
                 try {
-                    if (m.name.contains("LimitedFree") || m.name.contains("limitedFree")) {
+                    if (m.name.contains("LimitedFree", true)) {
                         XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(false))
                     } else {
                         XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
@@ -272,7 +209,7 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // updatePreferences -> no-op (prevents all lock/disable/badge logic)
+        // updatePreferences(Context, PreferenceGroup) -> no-op
         for (m in proHelper.declaredMethods) {
             if (m.returnType == Void.TYPE && m.parameterTypes.size == 2) {
                 val params = m.parameterTypes
@@ -283,109 +220,16 @@ class MainHook : IXposedHookLoadPackage {
             }
         }
 
-        // Utils.handleSubscriptionDowngrade -> no-op
-        try {
-            val utilsClass = cl.loadClass("com.waenhancer.xposed.utils.Utils")
-            for (m in utilsClass.declaredMethods) {
-                if (m.name == "handleSubscriptionDowngrade" && m.parameterTypes.size == 2) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // MainActivity.showDowngradeBottomSheet/showReversionBottomSheet -> no-op
-        try {
-            val maClass = cl.loadClass("com.waenhancer.activities.MainActivity")
-            for (m in maClass.declaredMethods) {
-                if (m.name == "showDowngradeBottomSheet" || m.name == "showReversionBottomSheet") {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // LicenseManager.silentCheck -> no-op
-        try {
-            val lmClass = cl.loadClass("com.waenhancer.xposed.utils.LicenseManager")
-            for (m in lmClass.declaredMethods) {
-                if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // Hook FeatureLoader to block companion plugin loading
-        // The plugin (com.waex.helper) has its own license checks that call setForceFree(true)
-        // and can override our hooks. By blocking getPluginClassLoader, we prevent the plugin
-        // from loading its own Pro logic.
-        try {
-            val flClass = cl.loadClass("com.waenhancer.xposed.core.FeatureLoader")
-            for (m in flClass.declaredMethods) {
-                if (m.name == "plugins" && m.parameterTypes.isEmpty()) {
-                    // Hook plugins() to run after it, then re-apply our hooks
-                    // in case the plugin overrode them
-                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                        override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            XposedBridge.log("$TAG: FeatureLoader.plugins() completed, re-applying hooks")
-                            // Re-hook in case plugin overrode anything
-                            try {
-                                val proHelper2 = cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
-                                for (m2 in proHelper2.declaredMethods) {
-                                    if (m2.returnType == Void.TYPE &&
-                                        m2.parameterTypes.contentEquals(arrayOf(java.lang.Boolean.TYPE))) {
-                                        try { XposedBridge.hookMethod(m2, XC_MethodReplacement.DO_NOTHING) } catch (_: Throwable) {}
-                                    }
-                                }
-                            } catch (_: Throwable) {}
-                        }
-                    })
-                    XposedBridge.log("$TAG: FeatureLoader.plugins() hooked")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // Hook ProHelper.getPluginClassLoader -> allow plugin to load
-        // But hook ProConfig and ProFeature inside the plugin to bypass its checks
+        // Hook getPluginClassLoader to hook plugin classes after load
         try {
             for (m in proHelper.declaredMethods) {
                 if (m.name == "getPluginClassLoader" && m.parameterTypes.size >= 1) {
-                    // Hook AFTER to get the classloader, then hook plugin classes
                     XposedBridge.hookMethod(m, object : XC_MethodHook() {
                         override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
                             val pluginLoader = param.result as? ClassLoader ?: return
-                            XposedBridge.log("$TAG: Plugin classloader obtained, hooking plugin classes")
                             hookPluginClasses(pluginLoader)
                         }
                     })
-                    XposedBridge.log("$TAG: getPluginClassLoader hooked (monitor)")
-                    break
-                }
-            }
-        } catch (_: Throwable) {}
-
-        // Hook HomeFragment.updateProUI -> no-op (we set the chip text ourselves)
-        try {
-            val hfClass = cl.loadClass("com.waenhancer.ui.fragments.HomeFragment")
-            for (m in hfClass.declaredMethods) {
-                if (m.name == "updateProUI" && m.parameterTypes.isEmpty()) {
-                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
-                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
-                            try {
-                                val bindingField = param.thisObject.javaClass.getDeclaredField("binding")
-                                bindingField.isAccessible = true
-                                val binding = bindingField.get(param.thisObject) ?: return null
-                                val chipField = binding.javaClass.getDeclaredField("proStatusChip")
-                                chipField.isAccessible = true
-                                val chip = chipField.get(binding) ?: return null
-                                val setTextMethod = chip.javaClass.getMethod("setText", CharSequence::class.java)
-                                setTextMethod.invoke(chip, "Pro Yearly")
-                            } catch (_: Throwable) {}
-                            return null
-                        }
-                    })
-                    XposedBridge.log("$TAG: HomeFragment.updateProUI -> Pro Yearly")
                     break
                 }
             }
@@ -402,143 +246,100 @@ class MainHook : IXposedHookLoadPackage {
                 }
             }
         } catch (_: Throwable) {}
+
+        XposedBridge.log("$TAG: ProHelper hooks installed")
     }
 
-    private fun hookSharedPrefsImpl() {
-        // Hook SharedPreferencesImpl (main app process reads through this)
-        val spImpl = try {
-            Class.forName("android.app.SharedPreferencesImpl")
-        } catch (_: Throwable) { null }
-
-        spImpl?.let { sp ->
-            try {
-                XposedHelpers.findAndHookMethod(sp, "getBoolean",
-                    String::class.java, java.lang.Boolean.TYPE,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            if (param.args[0] == "is_pro_verified") param.result = true
-                        }
-                    })
-            } catch (_: Throwable) {}
-
-            try {
-                XposedHelpers.findAndHookMethod(sp, "getString",
-                    String::class.java, String::class.java,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            when (param.args[0] as String) {
-                                "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
-                                "plan_name" -> param.result = "Pro Yearly"
-                                "expires_at" -> param.result = "1893456000000"
-                                "tg_username" -> param.result = "patcher"
-                                "whitelist_channels" -> param.result = "beta,stable"
-                                "encrypted_config" -> param.result = null
-                                "pending_downgrade_reason_msg" -> param.result = null
-                            }
-                        }
-                    })
-            } catch (_: Throwable) {}
-
-            try {
-                XposedHelpers.findAndHookMethod(sp, "getLong",
-                    String::class.java, java.lang.Long.TYPE,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            if (param.args[0] == "expires_at") param.result = 1893456000000L
-                        }
-                    })
-            } catch (_: Throwable) {}
-
-            val editorImpl = try {
-                Class.forName("android.app.SharedPreferencesImpl\$EditorImpl")
-            } catch (_: Throwable) { null }
-
-            editorImpl?.let { ei ->
-                try {
-                    XposedHelpers.findAndHookMethod(ei, "putBoolean",
-                        String::class.java, java.lang.Boolean.TYPE,
-                        object : XC_MethodHook() {
-                            override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                                if (param.args[0] == "is_pro_verified" && !(param.args[1] as Boolean)) {
-                                    param.result = param.thisObject
-                                }
-                            }
-                        })
-                } catch (_: Throwable) {}
-
-                try {
-                    XposedHelpers.findAndHookMethod(ei, "remove",
-                        String::class.java,
-                        object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            val key = param.args[0] as String
-                            if (key == "encrypted_config" || key == "license_key" ||
-                                key == "is_pro_verified" || key == "plan_name" ||
-                                key == "expires_at" || key == "whitelist_channels" ||
-                                key == "tg_username") {
-                                param.result = param.thisObject
-                            }
-                        }
-                    })
-                } catch (_: Throwable) {}
-            }
-        }
-
-        // Hook XSharedPreferences — ProHelper.getPrefs() returns Utils.xprefs which is XSharedPreferences
-        // This is what getProStatus()/getProPlanName() actually read from
+    private fun hookPluginClasses(pluginLoader: ClassLoader) {
+        XposedBridge.log("$TAG: Hooking plugin classes")
+        // ProConfig.getHookString -> passthrough
         try {
-            val xspClass = Class.forName("de.robv.android.xposed.XSharedPreferences")
-            XposedBridge.log("$TAG: Hooking XSharedPreferences")
-
-            try {
-                XposedHelpers.findAndHookMethod(xspClass, "getBoolean",
-                    String::class.java, java.lang.Boolean.TYPE,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            if (param.args[0] == "is_pro_verified") param.result = true
+            val pc = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
+            for (m in pc.declaredMethods) {
+                if (m.name == "getHookString" && m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
+                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any {
+                            return param.args[0] as String
                         }
                     })
-                XposedBridge.log("$TAG: XSharedPreferences.getBoolean hooked")
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: XSP getBoolean: $t")
+                    break
+                }
             }
+        } catch (_: Throwable) {}
 
-            try {
-                XposedHelpers.findAndHookMethod(xspClass, "getString",
-                    String::class.java, String::class.java,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            val key = param.args[0] as String
-                            when (key) {
-                                "license_key" -> param.result = "WAEX-PATCH-UNLK-0001"
-                                "plan_name" -> param.result = "Pro Yearly"
-                                "expires_at" -> param.result = "1893456000000"
-                                "tg_username" -> param.result = "patcher"
-                                "whitelist_channels" -> param.result = "beta,stable"
-                                "encrypted_config" -> param.result = null
-                                "pending_downgrade_reason_msg" -> param.result = null
-                            }
+        // ProFeature.nl -> true
+        try {
+            val pf = pluginLoader.loadClass("com.waex.helper.ProFeature")
+            val nl = pf.getDeclaredField("nl")
+            nl.isAccessible = true
+            nl.setBoolean(null, true)
+        } catch (_: Throwable) {}
+
+        // SecurityNative.getBaseUrl -> dummy
+        try {
+            val sn = pluginLoader.loadClass("com.waex.helper.utils.SecurityNative")
+            for (m in sn.declaredMethods) {
+                if (m.name == "getBaseUrl") {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant("https://waex.patcher.local"))
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // ProConfig.loadConfig -> inject fake config
+        try {
+            val pc = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
+            for (m in pc.declaredMethods) {
+                if (m.returnType == Void.TYPE && m.parameterTypes.size == 1 &&
+                    m.parameterTypes[0] == String::class.java) {
+                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
+                            try {
+                                val cf = pc.getDeclaredField("activeConfig")
+                                cf.isAccessible = true
+                                cf.set(null, buildFakeConfig())
+                            } catch (_: Throwable) {}
+                            return null
                         }
                     })
-                XposedBridge.log("$TAG: XSharedPreferences.getString hooked")
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: XSP getString: $t")
+                    break
+                }
             }
+        } catch (_: Throwable) {}
+    }
 
-            try {
-                XposedHelpers.findAndHookMethod(xspClass, "getLong",
-                    String::class.java, java.lang.Long.TYPE,
-                    object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
-                            if (param.args[0] == "expires_at") param.result = 1893456000000L
-                        }
-                    })
-                XposedBridge.log("$TAG: XSharedPreferences.getLong hooked")
-            } catch (t: Throwable) {
-                XposedBridge.log("$TAG: XSP getLong: $t")
+    private fun hookLicenseManager(cl: ClassLoader) {
+        try {
+            val lm = cl.loadClass("com.waenhancer.xposed.utils.LicenseManager")
+            for (m in lm.declaredMethods) {
+                if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    break
+                }
             }
-        } catch (t: Throwable) {
-            XposedBridge.log("$TAG: XSharedPreferences class not found: $t")
-        }
+        } catch (_: Throwable) {}
+    }
+
+    private fun hookDowngrade(cl: ClassLoader) {
+        // Utils.handleSubscriptionDowngrade -> no-op
+        try {
+            val u = cl.loadClass("com.waenhancer.xposed.utils.Utils")
+            for (m in u.declaredMethods) {
+                if (m.name == "handleSubscriptionDowngrade" && m.parameterTypes.size == 2) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // MainActivity.showDowngradeBottomSheet/showReversionBottomSheet -> no-op
+        try {
+            val ma = cl.loadClass("com.waenhancer.activities.MainActivity")
+            for (m in ma.declaredMethods) {
+                if (m.name == "showDowngradeBottomSheet" || m.name == "showReversionBottomSheet") {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                }
+            }
+        } catch (_: Throwable) {}
     }
 }
