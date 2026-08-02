@@ -38,11 +38,30 @@ class MainHook : IXposedHookLoadPackage {
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
         if (lpparam.packageName != PKG) return
 
-        XposedBridge.log("$TAG: Starting hooks")
+        // Check if patcher is enabled — read from patcher_prefs
+        // On first run defaults to true (auto-enable)
+        val patcherEnabled = try {
+            val ctx = android.app.AppGlobals.getInitialApplication()
+            if (ctx != null && ctx.packageName == PKG) {
+                ctx.getSharedPreferences("patcher_prefs", Context.MODE_PRIVATE)
+                    .getBoolean("patcher_enabled", true)
+            } else {
+                // Can't read yet, default to true
+                true
+            }
+        } catch (_: Throwable) {
+            true
+        }
+
+        if (!patcherEnabled) {
+            XposedBridge.log("$TAG: Patcher disabled by user, skipping all hooks")
+            return
+        }
+
+        XposedBridge.log("$TAG: Patcher enabled, installing hooks")
         val cl = lpparam.classLoader
 
         // Hook SharedPreferencesImpl IMMEDIATELY - before App.onCreate
-        // This ensures is_pro_verified=true is seen during expiration check
         hookSharedPrefsImpl()
 
         // Hook App.onCreate to install ProHelper hooks after classes are loaded
