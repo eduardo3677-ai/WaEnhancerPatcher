@@ -204,22 +204,12 @@ class MainHook : IXposedHookLoadPackage {
     private fun hookProHelper(proHelper: Class<*>, cl: ClassLoader) {
         XposedBridge.log("$TAG: Hooking ProHelper")
 
-        // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled,
-        // isPluginInstalled, isPluginPackageInstalled)
+        // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled)
+        // DON'T hook isPluginInstalled/isPluginPackageInstalled — let real values pass
+        // so the app can detect if plugin is missing and offer to download it
         for (m in proHelper.declaredMethods) {
             if (m.returnType == java.lang.Boolean.TYPE && m.parameterTypes.isEmpty()) {
                 try { XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true)) } catch (_: Throwable) {}
-            }
-        }
-
-        // boolean(Context) -> true (isPluginInstalled, isPluginPackageInstalled)
-        for (m in proHelper.declaredMethods) {
-            if (m.returnType == java.lang.Boolean.TYPE &&
-                m.parameterTypes.contentEquals(arrayOf(android.content.Context::class.java))) {
-                try {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(true))
-                    XposedBridge.log("$TAG: ${m.name}(Context) -> true")
-                } catch (_: Throwable) {}
             }
         }
 
@@ -370,6 +360,32 @@ class MainHook : IXposedHookLoadPackage {
                         }
                     })
                     XposedBridge.log("$TAG: getPluginClassLoader hooked (monitor)")
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook HomeFragment.updateProUI -> no-op (we set the chip text ourselves)
+        try {
+            val hfClass = cl.loadClass("com.waenhancer.ui.fragments.HomeFragment")
+            for (m in hfClass.declaredMethods) {
+                if (m.name == "updateProUI" && m.parameterTypes.isEmpty()) {
+                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
+                            try {
+                                val bindingField = param.thisObject.javaClass.getDeclaredField("binding")
+                                bindingField.isAccessible = true
+                                val binding = bindingField.get(param.thisObject) ?: return null
+                                val chipField = binding.javaClass.getDeclaredField("proStatusChip")
+                                chipField.isAccessible = true
+                                val chip = chipField.get(binding) ?: return null
+                                val setTextMethod = chip.javaClass.getMethod("setText", CharSequence::class.java)
+                                setTextMethod.invoke(chip, "Pro Yearly")
+                            } catch (_: Throwable) {}
+                            return null
+                        }
+                    })
+                    XposedBridge.log("$TAG: HomeFragment.updateProUI -> Pro Yearly")
                     break
                 }
             }
