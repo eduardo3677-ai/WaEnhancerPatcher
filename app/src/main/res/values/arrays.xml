@@ -2,5 +2,6 @@
 <resources>
     <string-array name="xposed_scope">
         <item>com.waenhancer</item>
+        <item>com.waex.helper</item>
     </string-array>
 </resources>
