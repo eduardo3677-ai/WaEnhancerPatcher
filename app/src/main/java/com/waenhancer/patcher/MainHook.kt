@@ -41,7 +41,8 @@ class MainHook : IXposedHookLoadPackage {
         XposedBridge.log("$TAG: Starting hooks")
         val cl = lpparam.classLoader
 
-        hookSharedPrefsImpl()
+        // Defer SharedPreferencesImpl hooks to after Application is created
+        // Hooking too early causes "Failed to write LSPosed marker" error
         hookAppOnCreate(cl)
     }
 
@@ -51,10 +52,13 @@ class MainHook : IXposedHookLoadPackage {
             XposedHelpers.findAndHookMethod(appClass, "onCreate",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                        XposedBridge.log("$TAG: App.onCreate BEFORE")
+                        hookSharedPrefsImpl()
                         hookProHelperSafe(cl)
                     }
                 })
         } catch (t: Throwable) {
+            hookSharedPrefsImpl()
             hookProHelperSafe(cl)
         }
     }
@@ -241,6 +245,49 @@ class MainHook : IXposedHookLoadPackage {
             for (m in lmClass.declaredMethods) {
                 if (m.name == "silentCheck" && m.parameterTypes.size == 2) {
                     XposedBridge.hookMethod(m, XC_MethodReplacement.DO_NOTHING)
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook FeatureLoader to block companion plugin loading
+        // The plugin (com.waex.helper) has its own license checks that call setForceFree(true)
+        // and can override our hooks. By blocking getPluginClassLoader, we prevent the plugin
+        // from loading its own Pro logic.
+        try {
+            val flClass = cl.loadClass("com.waenhancer.xposed.core.FeatureLoader")
+            for (m in flClass.declaredMethods) {
+                if (m.name == "plugins" && m.parameterTypes.isEmpty()) {
+                    // Hook plugins() to run after it, then re-apply our hooks
+                    // in case the plugin overrode them
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            XposedBridge.log("$TAG: FeatureLoader.plugins() completed, re-applying hooks")
+                            // Re-hook in case plugin overrode anything
+                            try {
+                                val proHelper2 = cl.loadClass("com.waenhancer.xposed.utils.ProHelper")
+                                for (m2 in proHelper2.declaredMethods) {
+                                    if (m2.returnType == Void.TYPE &&
+                                        m2.parameterTypes.contentEquals(arrayOf(java.lang.Boolean.TYPE))) {
+                                        try { XposedBridge.hookMethod(m2, XC_MethodReplacement.DO_NOTHING) } catch (_: Throwable) {}
+                                    }
+                                }
+                            } catch (_: Throwable) {}
+                        }
+                    })
+                    XposedBridge.log("$TAG: FeatureLoader.plugins() hooked")
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook ProHelper.getPluginClassLoader -> null (blocks plugin loading entirely)
+        try {
+            for (m in proHelper.declaredMethods) {
+                if (m.name == "getPluginClassLoader" || 
+                    (m.returnType == ClassLoader::class.java && m.parameterTypes.size >= 1)) {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(null))
+                    XposedBridge.log("$TAG: ${m.name} -> null (blocks companion plugin)")
                     break
                 }
             }
