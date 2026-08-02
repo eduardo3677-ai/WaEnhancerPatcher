@@ -138,8 +138,71 @@ class MainHook : IXposedHookLoadPackage {
         } catch (_: Throwable) { null }
     }
 
+    private fun hookPluginClasses(pluginLoader: ClassLoader) {
+        // Hook ProConfig.getHookString -> return hookKey (never null)
+        try {
+            val proConfigClass = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
+            for (m in proConfigClass.declaredMethods) {
+                if (m.name == "getHookString" && m.parameterTypes.contentEquals(arrayOf(String::class.java))) {
+                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any {
+                            return param.args[0] as String
+                        }
+                    })
+                    XposedBridge.log("$TAG: ProConfig.getHookString -> passthrough")
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook ProFeature.nl -> true (native library loaded)
+        try {
+            val proFeatureClass = pluginLoader.loadClass("com.waex.helper.ProFeature")
+            val nlField = proFeatureClass.getDeclaredField("nl")
+            nlField.isAccessible = true
+            nlField.setBoolean(null, true)
+            XposedBridge.log("$TAG: ProFeature.nl -> true")
+        } catch (_: Throwable) {}
+
+        // Hook SecurityNative.getBaseUrl -> return a dummy URL
+        try {
+            val secNativeClass = pluginLoader.loadClass("com.waex.helper.utils.SecurityNative")
+            for (m in secNativeClass.declaredMethods) {
+                if (m.name == "getBaseUrl") {
+                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant("https://waex.patcher.local"))
+                    XposedBridge.log("$TAG: SecurityNative.getBaseUrl -> patched")
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+
+        // Hook ProConfig.loadConfig -> inject fake config
+        try {
+            val proConfigClass = pluginLoader.loadClass("com.waex.helper.utils.ProConfig")
+            for (m in proConfigClass.declaredMethods) {
+                if (m.returnType == Void.TYPE && m.parameterTypes.size == 1 &&
+                    m.parameterTypes[0] == String::class.java) {
+                    // loadConfig(String) -> inject our config instead
+                    XposedBridge.hookMethod(m, object : XC_MethodReplacement() {
+                        override fun replaceHookedMethod(param: XC_MethodHook.MethodHookParam): Any? {
+                            // Set activeConfig directly
+                            try {
+                                val configField = proConfigClass.getDeclaredField("activeConfig")
+                                configField.isAccessible = true
+                                configField.set(null, buildFakeConfig())
+                                XposedBridge.log("$TAG: ProConfig.activeConfig -> fake config injected")
+                            } catch (_: Throwable) {}
+                            return null
+                        }
+                    })
+                    break
+                }
+            }
+        } catch (_: Throwable) {}
+    }
+
     private fun hookProHelper(proHelper: Class<*>, cl: ClassLoader) {
-        XposedBridge.log("$TAG: Hooking ProHelper: ${proHelper.name}")
+        XposedBridge.log("$TAG: Hooking ProHelper")
 
         // boolean() -> true (isProEnabled, isPillDesignProEnabled, isFilterItemsProEnabled)
         for (m in proHelper.declaredMethods) {
@@ -281,13 +344,20 @@ class MainHook : IXposedHookLoadPackage {
             }
         } catch (_: Throwable) {}
 
-        // Hook ProHelper.getPluginClassLoader -> null (blocks plugin loading entirely)
+        // Hook ProHelper.getPluginClassLoader -> allow plugin to load
+        // But hook ProConfig and ProFeature inside the plugin to bypass its checks
         try {
             for (m in proHelper.declaredMethods) {
-                if (m.name == "getPluginClassLoader" || 
-                    (m.returnType == ClassLoader::class.java && m.parameterTypes.size >= 1)) {
-                    XposedBridge.hookMethod(m, XC_MethodReplacement.returnConstant(null))
-                    XposedBridge.log("$TAG: ${m.name} -> null (blocks companion plugin)")
+                if (m.name == "getPluginClassLoader" && m.parameterTypes.size >= 1) {
+                    // Hook AFTER to get the classloader, then hook plugin classes
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: XC_MethodHook.MethodHookParam) {
+                            val pluginLoader = param.result as? ClassLoader ?: return
+                            XposedBridge.log("$TAG: Plugin classloader obtained, hooking plugin classes")
+                            hookPluginClasses(pluginLoader)
+                        }
+                    })
+                    XposedBridge.log("$TAG: getPluginClassLoader hooked (monitor)")
                     break
                 }
             }
